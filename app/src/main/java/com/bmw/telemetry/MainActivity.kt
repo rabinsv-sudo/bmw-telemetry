@@ -7,7 +7,6 @@ import android.bluetooth.BluetoothManager
 import android.bluetooth.BluetoothSocket
 import android.content.Context
 import android.content.pm.PackageManager
-import android.location.Location
 import android.os.Build
 import android.os.Bundle
 import android.os.Looper
@@ -16,10 +15,25 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
-import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.*
-import androidx.compose.runtime.*
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -27,7 +41,11 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
-import com.google.android.gms.location.*
+import com.google.android.gms.location.LocationCallback
+import com.google.android.gms.location.LocationRequest
+import com.google.android.gms.location.LocationResult
+import com.google.android.gms.location.LocationServices
+import com.google.android.gms.location.Priority
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -86,8 +104,7 @@ class MainActivity : ComponentActivity() {
                     val devName = it.name ?: ""
                     devName.contains("OBD", ignoreCase = true) || devName.contains("ELM", ignoreCase = true)
                 }
-
-                elmDevice?.let { dev ->
+[11.09.2026 11:49] Сергей: elmDevice?.let { dev ->
                     scope.launch {
                         elmDriver.startTelemetry(dev, EngineFamily.BMW_B_SERIES)
                     }
@@ -109,7 +126,7 @@ class MainActivity : ComponentActivity() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             permissions.add(Manifest.permission.BLUETOOTH_CONNECT)
             permissions.add(Manifest.permission.BLUETOOTH_SCAN)
-[11.09.2026 10:44] Сергей: }
+        }
         val missing = permissions.filter {
             ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
         }
@@ -186,8 +203,7 @@ class GpsSpeedTracker(context: Context) {
         val request = LocationRequest.Builder(Priority.PRIORITY_HIGH_ACCURACY, 200).setMinUpdateIntervalMillis(100).build()
         fusedClient.requestLocationUpdates(request, locationCallback, Looper.getMainLooper())
     }
-
-    fun stopTracking() = fusedClient.removeLocationUpdates(locationCallback)
+[11.09.2026 11:49] Сергей: fun stopTracking() = fusedClient.removeLocationUpdates(locationCallback)
 }
 
 class BmwElm327Driver {
@@ -206,7 +222,8 @@ class BmwElm327Driver {
             socket?.connect()
             input = socket?.inputStream
             output = socket?.outputStream
-[11.09.2026 10:44] Сергей: sendRaw("ATZ")
+
+            sendRaw("ATZ")
             sendRaw("ATE0")
             sendRaw("ATL0")
             sendRaw("ATS0")
@@ -218,7 +235,6 @@ class BmwElm327Driver {
             parseHex(baroResp, "4133")?.let { baroKpa = it }
 
             while (socket?.isConnected == true) {
-                // 1. ДВС (DME/DDE)
                 sendRaw("ATSH7E0")
                 val coolant = (parseHex(sendRaw("0105"), "4105") ?: 40) - 40
                 val mapKpa = parseHex(sendRaw("010B"), "410B") ?: baroKpa
@@ -233,7 +249,6 @@ class BmwElm327Driver {
                     }
                 }
 
-                // 2. АКПП (ZF 8HP)
                 sendRaw("ATSH7E1")
                 val gearRaw = sendRaw("221E32")
                 val gearOil = if (gearRaw.contains("621E32")) (parseHex(gearRaw, "621E32") ?: 40) - 40 else 0
@@ -289,7 +304,7 @@ fun FullBmwDashboard(metrics: LiveMetrics, dragData: DragResult) {
         ) {
             Column(modifier = Modifier.padding(16.dp), horizontalAlignment = Alignment.CenterHorizontally) {
                 Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                    Text(text = "0 - 100 KM/H DRAG", color = Color.Gray, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+[11.09.2026 11:49] Сергей: Text(text = "0 - 100 KM/H DRAG", color = Color.Gray, fontSize = 12.sp, fontWeight = FontWeight.Bold)
                     val statusText = when (dragData.state) {
                         DragState.IDLE -> "ГОТОВ"
                         DragState.MEASURING -> "ЗАМЕР..."
@@ -301,7 +316,7 @@ fun FullBmwDashboard(metrics: LiveMetrics, dragData: DragResult) {
                         DragState.FINISHED -> Color.Cyan
                     }
                     Text(text = statusText, color = statusColor, fontSize = 12.sp, fontWeight = FontWeight.Bold)
-[11.09.2026 10:44] Сергей: }
+                }
                 val displayTime = when (dragData.state) {
                     DragState.FINISHED -> String.format("%.2f s", dragData.final0to100Sec ?: 0f)
                     DragState.MEASURING -> String.format("%.1f s", dragData.elapsedTimeSec)
