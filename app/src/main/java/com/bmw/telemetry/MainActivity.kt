@@ -100,7 +100,7 @@ class MainActivity : ComponentActivity() {
             LaunchedEffect(selectedDevice) {
                 selectedDevice?.let { dev ->
                     scope.launch {
-                        elmDriver.stop() // Останавливаем предыдущее, если было
+                        elmDriver.stop() 
                         elmDriver.startTelemetry(dev, EngineFamily.BMW_B_SERIES)
                     }
                 }
@@ -279,7 +279,8 @@ class BmwElm327Driver {
             sendRaw("ATE0")
             sendRaw("ATL0")
             sendRaw("ATS0")
-            sendRaw("ATSP6")
+            sendRaw("ATSP0") // ИЗМЕНЕНО: АВТОМАТИЧЕСКИЙ ПОИСК ПРОТОКОЛА
+            delay(500)
             sendRaw("ATAT1")
 
             var baroKpa = 100
@@ -289,11 +290,16 @@ class BmwElm327Driver {
                 baroKpa = parsedBaro
             }
 
-            connectionStatus.value = "ПОДКЛЮЧЕНО К ЭБУ. ЧТЕНИЕ..."
-
             while (socket?.isConnected == true) {
                 sendRaw("ATSH7E0")
-                val coolant = (parseHex(sendRaw("0105"), "4105") ?: 40) - 40
+                val rawCoolantResp = sendRaw("0105")
+                
+                // ИЗМЕНЕНО: ТЕПЕРЬ МЫ ВИДИМ СЫРОЙ ОТВЕТ АДАПТЕРА ПРЯМО НА ПАНЕЛИ
+                withContext(Dispatchers.Main) {
+                    connectionStatus.value = "ЭБУ: $rawCoolantResp" 
+                }
+
+                val coolant = (parseHex(rawCoolantResp, "4105") ?: 40) - 40
                 val mapKpa = parseHex(sendRaw("010B"), "410B") ?: baroKpa
                 val boost = ((mapKpa - baroKpa).coerceAtLeast(0)) / 100.0f
 
@@ -360,7 +366,6 @@ fun FullBmwDashboard(metrics: LiveMetrics, dragData: DragResult, status: String,
         modifier = Modifier.fillMaxSize().background(Color(0xFF101010)).padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        // КЛИКАБЕЛЬНАЯ ПАНЕЛЬ СТАТУСА
         Card(
             shape = RoundedCornerShape(8.dp),
             colors = CardDefaults.cardColors(containerColor = Color(0xFF1E1E1E)),
@@ -368,7 +373,7 @@ fun FullBmwDashboard(metrics: LiveMetrics, dragData: DragResult, status: String,
         ) {
             Text(
                 text = status,
-                color = if (status.contains("ОШИБКА")) Color.Red else if (status.contains("ЧТЕНИЕ")) Color.Green else Color.Yellow,
+                color = if (status.contains("ОШИБКА")) Color.Red else if (status.contains("ЭБУ:")) Color.Cyan else Color.Yellow,
                 fontSize = 13.sp,
                 fontWeight = FontWeight.Bold,
                 textAlign = TextAlign.Center,
@@ -437,4 +442,3 @@ fun MiniGauge(title: String, value: String, unit: String, color: Color) {
         }
     }
 }
-
