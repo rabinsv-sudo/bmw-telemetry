@@ -15,25 +15,12 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Text
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.collectAsState
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -41,11 +28,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
-import com.google.android.gms.location.LocationCallback
-import com.google.android.gms.location.LocationRequest
-import com.google.android.gms.location.LocationResult
-import com.google.android.gms.location.LocationServices
-import com.google.android.gms.location.Priority
+import com.google.android.gms.location.*
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -72,6 +55,7 @@ data class DragResult(
     val final0to100Sec: Float? = null
 )
 
+@SuppressLint("MissingPermission")
 class MainActivity : ComponentActivity() {
 
     private val elmDriver = BmwElm327Driver()
@@ -99,12 +83,14 @@ class MainActivity : ComponentActivity() {
             LaunchedEffect(Unit) {
                 val btManager = getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager
                 val adapter = btManager?.adapter
-                @SuppressLint("MissingPermission")
-                val elmDevice = adapter?.bondedDevices?.firstOrNull {
-                    val devName = it.name ?: ""
+                
+                // Исправлено: явно указали тип device: BluetoothDevice
+                val elmDevice = adapter?.bondedDevices?.firstOrNull { device: BluetoothDevice ->
+                    val devName = device.name ?: ""
                     devName.contains("OBD", ignoreCase = true) || devName.contains("ELM", ignoreCase = true)
                 }
-[11.09.2026 11:49] Сергей: elmDevice?.let { dev ->
+
+                elmDevice?.let { dev ->
                     scope.launch {
                         elmDriver.startTelemetry(dev, EngineFamily.BMW_B_SERIES)
                     }
@@ -127,8 +113,8 @@ class MainActivity : ComponentActivity() {
             permissions.add(Manifest.permission.BLUETOOTH_CONNECT)
             permissions.add(Manifest.permission.BLUETOOTH_SCAN)
         }
-        val missing = permissions.filter {
-            ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
+        val missing = permissions.filter { perm ->
+            ContextCompat.checkSelfPermission(this, perm) != PackageManager.PERMISSION_GRANTED
         }
         if (missing.isNotEmpty()) {
             permissionLauncher.launch(missing.toTypedArray())
@@ -178,8 +164,9 @@ class GpsSpeedTracker(context: Context) {
                         val interp = if (diff > 0.1f) {
                             val fraction = (100f - lastSpeedKmH) / diff
                             ((lastTimestampNano - startTimeNano) / 1_000_000_000f) + (((nowNano - lastTimestampNano) / 1_000_000_000f) * fraction)
-                        } else elapsedSec
-
+                        } else {
+                            elapsedSec
+                        }
                         _dragData.value = current.copy(state = DragState.FINISHED, currentSpeedKmH = speedKmH, final0to100Sec = interp)
                     } else {
                         lastSpeedKmH = speedKmH
@@ -203,7 +190,10 @@ class GpsSpeedTracker(context: Context) {
         val request = LocationRequest.Builder(Priority.PRIORITY_HIGH_ACCURACY, 200).setMinUpdateIntervalMillis(100).build()
         fusedClient.requestLocationUpdates(request, locationCallback, Looper.getMainLooper())
     }
-[11.09.2026 11:49] Сергей: fun stopTracking() = fusedClient.removeLocationUpdates(locationCallback)
+
+    fun stopTracking() {
+        fusedClient.removeLocationUpdates(locationCallback)
+    }
 }
 
 class BmwElm327Driver {
@@ -232,7 +222,10 @@ class BmwElm327Driver {
 
             var baroKpa = 100
             val baroResp = sendRaw("0133")
-            parseHex(baroResp, "4133")?.let { baroKpa = it }
+            val parsedBaro = parseHex(baroResp, "4133")
+            if (parsedBaro != null) {
+                baroKpa = parsedBaro
+            }
 
             while (socket?.isConnected == true) {
                 sendRaw("ATSH7E0")
@@ -255,7 +248,7 @@ class BmwElm327Driver {
 
                 _metrics.value = LiveMetrics(coolant, engOil, gearOil, boost)
             }
-        } catch (_: Exception) {
+        } catch (e: Exception) {
             stop()
         }
     }
@@ -286,7 +279,7 @@ class BmwElm327Driver {
     }
 
     fun stop() {
-        try { socket?.close() } catch (_: Exception) {}
+        try { socket?.close() } catch (e: Exception) {}
         socket = null
     }
 }
@@ -304,7 +297,7 @@ fun FullBmwDashboard(metrics: LiveMetrics, dragData: DragResult) {
         ) {
             Column(modifier = Modifier.padding(16.dp), horizontalAlignment = Alignment.CenterHorizontally) {
                 Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-[11.09.2026 11:49] Сергей: Text(text = "0 - 100 KM/H DRAG", color = Color.Gray, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                    Text(text = "0 - 100 KM/H DRAG", color = Color.Gray, fontSize = 12.sp, fontWeight = FontWeight.Bold)
                     val statusText = when (dragData.state) {
                         DragState.IDLE -> "ГОТОВ"
                         DragState.MEASURING -> "ЗАМЕР..."
