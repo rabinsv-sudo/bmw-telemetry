@@ -1,3 +1,5 @@
+[11.09.2026 10:44] Сергей: package com.bmw.telemetry
+
 import android.Manifest
 import android.annotation.SuppressLint
 import android.bluetooth.BluetoothDevice
@@ -77,12 +79,12 @@ class MainActivity : ComponentActivity() {
             val scope = rememberCoroutineScope()
 
             LaunchedEffect(Unit) {
-                val btManager = getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
-                val adapter = btManager.adapter
+                val btManager = getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager
+                val adapter = btManager?.adapter
                 @SuppressLint("MissingPermission")
                 val elmDevice = adapter?.bondedDevices?.firstOrNull {
-                    it.name?.contains("OBD", ignoreCase = true) == true ||
-                    it.name?.contains("ELM", ignoreCase = true) == true
+                    val devName = it.name ?: ""
+                    devName.contains("OBD", ignoreCase = true) || devName.contains("ELM", ignoreCase = true)
                 }
 
                 elmDevice?.let { dev ->
@@ -94,8 +96,7 @@ class MainActivity : ComponentActivity() {
 
             FullBmwDashboard(
                 metrics = metrics,
-                dragData = dragData,
-                onResetDrag = { gpsTracker.resetMeter() }
+                dragData = dragData
             )
         }
     }
@@ -107,8 +108,8 @@ class MainActivity : ComponentActivity() {
         )
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             permissions.add(Manifest.permission.BLUETOOTH_CONNECT)
-[11.09.2026 10:04] Сергей: permissions.add(Manifest.permission.BLUETOOTH_SCAN)
-        }
+            permissions.add(Manifest.permission.BLUETOOTH_SCAN)
+[11.09.2026 10:44] Сергей: }
         val missing = permissions.filter {
             ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
         }
@@ -187,7 +188,6 @@ class GpsSpeedTracker(context: Context) {
     }
 
     fun stopTracking() = fusedClient.removeLocationUpdates(locationCallback)
-    fun resetMeter() { _dragData.value = DragResult(state = DragState.IDLE) }
 }
 
 class BmwElm327Driver {
@@ -198,15 +198,15 @@ class BmwElm327Driver {
 
     private val _metrics = MutableStateFlow(LiveMetrics())
     val metrics = _metrics.asStateFlow()
-[11.09.2026 10:04] Сергей: @SuppressLint("MissingPermission")
+
+    @SuppressLint("MissingPermission")
     suspend fun startTelemetry(device: BluetoothDevice, engine: EngineFamily) = withContext(Dispatchers.IO) {
         try {
             socket = device.createRfcommSocketToServiceRecord(sppUuid)
             socket?.connect()
             input = socket?.inputStream
             output = socket?.outputStream
-
-            sendRaw("ATZ")
+[11.09.2026 10:44] Сергей: sendRaw("ATZ")
             sendRaw("ATE0")
             sendRaw("ATL0")
             sendRaw("ATS0")
@@ -277,7 +277,7 @@ class BmwElm327Driver {
 }
 
 @Composable
-fun FullBmwDashboard(metrics: LiveMetrics, dragData: DragResult, onResetDrag: () -> Unit) {
+fun FullBmwDashboard(metrics: LiveMetrics, dragData: DragResult) {
     Column(
         modifier = Modifier.fillMaxSize().background(Color(0xFF101010)).padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
@@ -289,28 +289,26 @@ fun FullBmwDashboard(metrics: LiveMetrics, dragData: DragResult, onResetDrag: ()
         ) {
             Column(modifier = Modifier.padding(16.dp), horizontalAlignment = Alignment.CenterHorizontally) {
                 Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                    Text("0 - 100 KM/H DRAG", color = Color.Gray, fontSize = 12.sp, fontWeight = FontWeight.Bold)
-                    Text(
-                        text = when (dragData.state) {
-                            DragState.IDLE -> "ГОТОВ"
-                            DragState.MEASURING -> "ЗАМЕР..."
-[11.09.2026 10:04] Сергей: DragState.FINISHED -> "ФИНИШ"
-                        },
-                        color = when (dragData.state) {
-                            DragState.IDLE -> Color.Yellow
-                            DragState.MEASURING -> Color.Green
-                            DragState.FINISHED -> Color.Cyan
-                        },
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.Bold
-                    )
-                }
+                    Text(text = "0 - 100 KM/H DRAG", color = Color.Gray, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                    val statusText = when (dragData.state) {
+                        DragState.IDLE -> "ГОТОВ"
+                        DragState.MEASURING -> "ЗАМЕР..."
+                        DragState.FINISHED -> "ФИНИШ"
+                    }
+                    val statusColor = when (dragData.state) {
+                        DragState.IDLE -> Color.Yellow
+                        DragState.MEASURING -> Color.Green
+                        DragState.FINISHED -> Color.Cyan
+                    }
+                    Text(text = statusText, color = statusColor, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+[11.09.2026 10:44] Сергей: }
                 val displayTime = when (dragData.state) {
                     DragState.FINISHED -> String.format("%.2f s", dragData.final0to100Sec ?: 0f)
                     DragState.MEASURING -> String.format("%.1f s", dragData.elapsedTimeSec)
                     DragState.IDLE -> "--.- s"
                 }
-                Text(text = displayTime, fontSize = 54.sp, fontWeight = FontWeight.Black, color = if (dragData.state == DragState.FINISHED) Color.Green else Color.White)
+                val resultColor = if (dragData.state == DragState.FINISHED) Color.Green else Color.White
+                Text(text = displayTime, fontSize = 54.sp, fontWeight = FontWeight.Black, color = resultColor)
                 Text(text = "${dragData.currentSpeedKmH.toInt()} км/ч", fontSize = 20.sp, color = Color.LightGray)
             }
         }
@@ -320,8 +318,10 @@ fun FullBmwDashboard(metrics: LiveMetrics, dragData: DragResult, onResetDrag: ()
             Box(modifier = Modifier.weight(1f)) { MiniGauge("АНТИФРИЗ", "${metrics.coolant}", "°C", Color(0xFF2196F3)) }
         }
         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            Box(modifier = Modifier.weight(1f)) { MiniGauge("ДВС МАСЛО", "${metrics.engineOil}", "°C", if (metrics.engineOil > 115) Color.Red else Color(0xFF4CAF50)) }
-            Box(modifier = Modifier.weight(1f)) { MiniGauge("АКПП МАСЛО", "${metrics.gearboxOil}", "°C", if (metrics.gearboxOil > 105) Color.Red else Color(0xFFFF5722)) }
+            val oilCol = if (metrics.engineOil > 115) Color.Red else Color(0xFF4CAF50)
+            val gearCol = if (metrics.gearboxOil > 105) Color.Red else Color(0xFFFF5722)
+            Box(modifier = Modifier.weight(1f)) { MiniGauge("ДВС МАСЛО", "${metrics.engineOil}", "°C", oilCol) }
+            Box(modifier = Modifier.weight(1f)) { MiniGauge("АКПП МАСЛО", "${metrics.gearboxOil}", "°C", gearCol) }
         }
     }
 }
@@ -334,11 +334,11 @@ fun MiniGauge(title: String, value: String, unit: String, color: Color) {
         modifier = Modifier.fillMaxWidth().height(110.dp)
     ) {
         Column(modifier = Modifier.fillMaxSize().padding(12.dp), verticalArrangement = Arrangement.SpaceBetween) {
-            Text(title, fontSize = 11.sp, color = Color.Gray, fontWeight = FontWeight.Bold)
+            Text(text = title, fontSize = 11.sp, color = Color.Gray, fontWeight = FontWeight.Bold)
             Row(verticalAlignment = Alignment.Bottom) {
-                Text(value, fontSize = 34.sp, color = color, fontWeight = FontWeight.Black)
+                Text(text = value, fontSize = 34.sp, color = color, fontWeight = FontWeight.Black)
                 Spacer(modifier = Modifier.width(4.dp))
-                Text(unit, fontSize = 14.sp, color = Color.Gray, modifier = Modifier.padding(bottom = 6.dp))
+                Text(text = unit, fontSize = 14.sp, color = Color.Gray, modifier = Modifier.padding(bottom = 6.dp))
             }
         }
     }
