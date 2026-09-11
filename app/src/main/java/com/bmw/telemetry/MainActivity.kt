@@ -7,6 +7,7 @@ import android.bluetooth.BluetoothManager
 import android.bluetooth.BluetoothSocket
 import android.content.Context
 import android.content.pm.PackageManager
+import android.location.Location
 import android.os.Build
 import android.os.Bundle
 import android.os.Looper
@@ -43,7 +44,7 @@ import java.io.OutputStream
 import java.util.UUID
 
 enum class EngineFamily { BMW_N_SERIES, BMW_B_SERIES }
-enum class DragState { IDLE, MEASURING, FINISHED }
+enum class DragState { IDLE, MEASURING }
 
 data class LiveMetrics(
     val coolant: Int = 0,
@@ -56,7 +57,12 @@ data class DragResult(
     val state: DragState = DragState.IDLE,
     val currentSpeedKmH: Float = 0f,
     val elapsedTimeSec: Float = 0.0f,
-    val final0to100Sec: Float? = null
+    val distanceMeters: Float = 0f,
+    val time0to60: Float? = null,
+    val time0to100: Float? = null,
+    val time100to200: Float? = null,
+    val time250m: Float? = null,
+    val timestamp: Long = System.currentTimeMillis()
 )
 
 @SuppressLint("MissingPermission")
@@ -81,16 +87,18 @@ class MainActivity : ComponentActivity() {
         setContent {
             val metrics by elmDriver.metrics.collectAsState()
             val dragData by gpsTracker.dragData.collectAsState()
+            val history by gpsTracker.dragHistory.collectAsState()
             val connectionStatus by elmDriver.connectionStatus.collectAsState()
             val scope = rememberCoroutineScope()
             val context = LocalContext.current
 
-            var showDialog by remember { mutableStateOf(false) }
+            var showDeviceDialog by remember { mutableStateOf(false) }
+            var showHistoryDialog by remember { mutableStateOf(false) }
             var pairedDevices by remember { mutableStateOf<List<BluetoothDevice>>(emptyList()) }
             var selectedDevice by remember { mutableStateOf<BluetoothDevice?>(null) }
 
-            LaunchedEffect(showDialog) {
-                if (showDialog) {
+            LaunchedEffect(showDeviceDialog) {
+                if (showDeviceDialog) {
                     val btManager = context.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager
                     val adapter = btManager?.adapter
                     pairedDevices = adapter?.bondedDevices?.toList() ?: emptyList()
@@ -100,7 +108,7 @@ class MainActivity : ComponentActivity() {
             LaunchedEffect(selectedDevice) {
                 selectedDevice?.let { dev ->
                     scope.launch {
-                        elmDriver.stop() 
+                        elmDriver.stop()
                         elmDriver.startTelemetry(dev, EngineFamily.BMW_B_SERIES)
                     }
                 }
@@ -110,12 +118,13 @@ class MainActivity : ComponentActivity() {
                 metrics = metrics,
                 dragData = dragData,
                 status = connectionStatus,
-                onStatusClick = { showDialog = true }
+                onStatusClick = { showDeviceDialog = true },
+                onHistoryClick = { showHistoryDialog = true }
             )
 
-            if (showDialog) {
+            if (showDeviceDialog) {
                 AlertDialog(
-                    onDismissRequest = { showDialog = false },
+                    onDismissRequest = { showDeviceDialog = false },
                     title = { Text("Выберите Bluetooth адаптер") },
                     text = {
                         Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
@@ -125,13 +134,10 @@ class MainActivity : ComponentActivity() {
                             pairedDevices.forEach { device ->
                                 val name = device.name ?: "Неизвестное устройство"
                                 Column(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .clickable {
-                                            selectedDevice = device
-                                            showDialog = false
-                                        }
-                                        .padding(vertical = 12.dp)
+                                    modifier = Modifier.fillMaxWidth().clickable {
+                                        selectedDevice = device
+                                        showDeviceDialog = false
+                                    }.padding(vertical = 12.dp)
                                 ) {
                                     Text(text = name, fontWeight = FontWeight.Bold, color = Color.White)
                                     Text(text = device.address, fontSize = 12.sp, color = Color.Gray)
@@ -140,36 +146,45 @@ class MainActivity : ComponentActivity() {
                             }
                         }
                     },
-                    confirmButton = {
-                        TextButton(onClick = { showDialog = false }) {
-                            Text("ОТМЕНА", color = Color.Red)
+                    confirmButton = { TextButton(onClick = { showDeviceDialog = false }) { Text("ОТМЕНА", color = Color.Red) } },
+                    containerColor = Color(0xFF1E1E1E), titleContentColor = Color.White, textContentColor = Color.White
+                )
+            }
+
+            if (showHistoryDialog) {
+                AlertDialog(
+                    onDismissRequest = { showHistoryDialog = false },
+                    title = { Text("История заездов") },
+                    text = {
+                        Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
+                            if (history.isEmpty()) Text("Нет сохраненных заездов.", color = Color.Gray)
+                            history.asReversed().forEachIndexed { index, run ->
+                                Column(modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp)) {
+                                    Text("Заезд #${history.size - index}", fontWeight = FontWeight.Bold, color = Color.Cyan)
+                                    run.time0to60?.let { Text("0-60: ${String.format("%.2f", it)} s", color = Color.White) }
+                                    run.time0to100?.let { Text("0-100: ${String.format("%.2f", it)} s", color = Color.White) }
+                                    run.time100to200?.let { Text("100-200: ${String.format("%.2f", it)} s", color = Color.White) }
+                                    run.time250m?.let { Text("250 м: ${String.format("%.2f", it)} s", color = Color.White) }
+                                }
+                                HorizontalDivider(color = Color.DarkGray)
+                            }
                         }
                     },
-                    containerColor = Color(0xFF1E1E1E),
-                    titleContentColor = Color.White,
-                    textContentColor = Color.White
+                    confirmButton = { TextButton(onClick = { showHistoryDialog = false }) { Text("ЗАКРЫТЬ", color = Color.White) } },
+                    containerColor = Color(0xFF1E1E1E), titleContentColor = Color.White, textContentColor = Color.White
                 )
             }
         }
     }
 
     private fun checkAndRequestPermissions() {
-        val permissions = mutableListOf(
-            Manifest.permission.ACCESS_FINE_LOCATION,
-            Manifest.permission.ACCESS_COARSE_LOCATION
-        )
+        val permissions = mutableListOf(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             permissions.add(Manifest.permission.BLUETOOTH_CONNECT)
             permissions.add(Manifest.permission.BLUETOOTH_SCAN)
         }
-        val missing = permissions.filter { perm ->
-            ContextCompat.checkSelfPermission(this, perm) != PackageManager.PERMISSION_GRANTED
-        }
-        if (missing.isNotEmpty()) {
-            permissionLauncher.launch(missing.toTypedArray())
-        } else {
-            gpsTracker.startTracking()
-        }
+        val missing = permissions.filter { ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED }
+        if (missing.isNotEmpty()) permissionLauncher.launch(missing.toTypedArray()) else gpsTracker.startTracking()
     }
 
     override fun onDestroy() {
@@ -181,54 +196,107 @@ class MainActivity : ComponentActivity() {
 
 class GpsSpeedTracker(context: Context) {
     private val fusedClient = LocationServices.getFusedLocationProviderClient(context)
+    
     private val _dragData = MutableStateFlow(DragResult())
     val dragData = _dragData.asStateFlow()
 
+    private val _dragHistory = MutableStateFlow<List<DragResult>>(emptyList())
+    val dragHistory = _dragHistory.asStateFlow()
+
     private var startTimeNano: Long = 0L
     private var lastSpeedKmH: Float = 0f
-    private var lastTimestampNano: Long = 0L
+    private var lastElapsedSec: Float = 0f
+    private var lastLocation: Location? = null
+    
+    private var currentRun = DragResult()
+    private var stopTimerStartNano: Long? = null
+
+    private fun interpolate(target: Float, v1: Float, v2: Float, t1: Float, t2: Float): Float {
+        if (v2 <= v1) return t2
+        return t1 + (t2 - t1) * ((target - v1) / (v2 - v1))
+    }
 
     private val locationCallback = object : LocationCallback() {
         override fun onLocationResult(result: LocationResult) {
             val location = result.lastLocation ?: return
             val speedKmH = (location.speed * 3.6f).coerceAtLeast(0f)
-            val nowNano = SystemClock.elapsedRealtimeNanos()
-            val current = _dragData.value
+            
+            // Используем время от GPS для точности
+            val nowNano = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN_MR1) {
+                location.elapsedRealtimeNanos
+            } else SystemClock.elapsedRealtimeNanos()
 
-            when (current.state) {
+            when (currentRun.state) {
                 DragState.IDLE -> {
-                    if (speedKmH >= 2.5f) {
+                    if (speedKmH >= 3f) {
+                        // Старт замера
                         startTimeNano = nowNano
                         lastSpeedKmH = speedKmH
-                        lastTimestampNano = nowNano
-                        _dragData.value = current.copy(state = DragState.MEASURING, currentSpeedKmH = speedKmH)
+                        lastElapsedSec = 0f
+                        lastLocation = location
+                        stopTimerStartNano = null
+                        currentRun = DragResult(state = DragState.MEASURING, currentSpeedKmH = speedKmH)
+                        _dragData.value = currentRun
                     } else {
-                        _dragData.value = current.copy(currentSpeedKmH = speedKmH)
+                        // Обновляем только скорость
+                        _dragData.value = currentRun.copy(currentSpeedKmH = speedKmH)
                     }
                 }
                 DragState.MEASURING -> {
                     val elapsedSec = (nowNano - startTimeNano) / 1_000_000_000f
-                    if (speedKmH >= 100f) {
-                        val diff = speedKmH - lastSpeedKmH
-                        val interp = if (diff > 0.1f) {
-                            val fraction = (100f - lastSpeedKmH) / diff
-                            ((lastTimestampNano - startTimeNano) / 1_000_000_000f) + (((nowNano - lastTimestampNano) / 1_000_000_000f) * fraction)
-                        } else {
-                            elapsedSec
+                    val distStep = lastLocation?.distanceTo(location) ?: 0f
+                    val newDist = currentRun.distanceMeters + distStep
+
+                    var t60 = currentRun.time0to60
+                    var t100 = currentRun.time0to100
+                    var t200 = currentRun.time100to200
+                    var t250m = currentRun.time250m
+
+                    // Отсечки скорости
+                    if (t60 == null && speedKmH >= 60f) t60 = interpolate(60f, lastSpeedKmH, speedKmH, lastElapsedSec, elapsedSec)
+                    if (t100 == null && speedKmH >= 100f) t100 = interpolate(100f, lastSpeedKmH, speedKmH, lastElapsedSec, elapsedSec)
+                    if (t200 == null && speedKmH >= 200f && t100 != null) {
+                        val raw200 = interpolate(200f, lastSpeedKmH, speedKmH, lastElapsedSec, elapsedSec)
+                        t200 = raw200 - t100
+                    }
+
+                    // Отсечка дистанции 250м
+                    if (t250m == null && newDist >= 250f) {
+                        t250m = interpolate(250f, currentRun.distanceMeters, newDist, lastElapsedSec, elapsedSec)
+                    }
+
+                    // Логика авто-сброса (если машина стоит > 5 секунд)
+                    if (speedKmH < 3f) {
+                        if (stopTimerStartNano == null) stopTimerStartNano = nowNano
+                        else if ((nowNano - stopTimerStartNano!!) / 1_000_000_000f > 5f) {
+                            // Сохраняем результат, если есть хоть одна отсечка
+                            if (t60 != null || t100 != null || t250m != null) {
+                                val finalRun = currentRun.copy(time0to60 = t60, time0to100 = t100, time100to200 = t200, time250m = t250m)
+                                _dragHistory.value = _dragHistory.value + finalRun
+                            }
+                            // Сброс в IDLE
+                            currentRun = DragResult(state = DragState.IDLE, currentSpeedKmH = speedKmH)
+                            _dragData.value = currentRun
+                            return
                         }
-                        _dragData.value = current.copy(state = DragState.FINISHED, currentSpeedKmH = speedKmH, final0to100Sec = interp)
                     } else {
-                        lastSpeedKmH = speedKmH
-                        lastTimestampNano = nowNano
-                        _dragData.value = current.copy(currentSpeedKmH = speedKmH, elapsedTimeSec = elapsedSec)
+                        stopTimerStartNano = null
                     }
-                }
-                DragState.FINISHED -> {
-                    if (speedKmH < 1.5f) {
-                        _dragData.value = DragResult(state = DragState.IDLE)
-                    } else {
-                        _dragData.value = current.copy(currentSpeedKmH = speedKmH)
-                    }
+
+                    currentRun = currentRun.copy(
+                        currentSpeedKmH = speedKmH,
+                        elapsedTimeSec = elapsedSec,
+                        distanceMeters = newDist,
+                        time0to60 = t60,
+                        time0to100 = t100,
+                        time100to200 = t200,
+                        time250m = t250m
+                    )
+
+                    lastSpeedKmH = speedKmH
+                    lastElapsedSec = elapsedSec
+                    lastLocation = location
+                    _dragData.value = currentRun
                 }
             }
         }
@@ -236,12 +304,10 @@ class GpsSpeedTracker(context: Context) {
 
     @SuppressLint("MissingPermission")
     fun startTracking() {
-        val request = LocationRequest.Builder(Priority.PRIORITY_HIGH_ACCURACY, 200).setMinUpdateIntervalMillis(100).build()
+        val request = LocationRequest.Builder(Priority.PRIORITY_HIGH_ACCURACY, 100).setMinUpdateIntervalMillis(50).build()
         fusedClient.requestLocationUpdates(request, locationCallback, Looper.getMainLooper())
     }
-    fun stopTracking() {
-        fusedClient.removeLocationUpdates(locationCallback)
-    }
+    fun stopTracking() = fusedClient.removeLocationUpdates(locationCallback)
 }
 
 class BmwElm327Driver {
@@ -252,14 +318,12 @@ class BmwElm327Driver {
 
     private val _metrics = MutableStateFlow(LiveMetrics())
     val metrics = _metrics.asStateFlow()
-
     val connectionStatus = MutableStateFlow("НАЖМИТЕ СЮДА ДЛЯ ВЫБОРА АДАПТЕРА")
 
     @SuppressLint("MissingPermission")
     suspend fun startTelemetry(device: BluetoothDevice, engine: EngineFamily) = withContext(Dispatchers.IO) {
         try {
             connectionStatus.value = "ПОДКЛЮЧЕНИЕ К ${device.name}..."
-            
             try {
                 socket = device.createRfcommSocketToServiceRecord(sppUuid)
                 socket?.connect()
@@ -279,25 +343,18 @@ class BmwElm327Driver {
             sendRaw("ATE0")
             sendRaw("ATL0")
             sendRaw("ATS0")
-            sendRaw("ATSP0") // ИЗМЕНЕНО: АВТОМАТИЧЕСКИЙ ПОИСК ПРОТОКОЛА
+            sendRaw("ATSP0") 
             delay(500)
             sendRaw("ATAT1")
 
             var baroKpa = 100
             val baroResp = sendRaw("0133")
-            val parsedBaro = parseHex(baroResp, "4133")
-            if (parsedBaro != null) {
-                baroKpa = parsedBaro
-            }
+            parseHex(baroResp, "4133")?.let { baroKpa = it }
 
             while (socket?.isConnected == true) {
                 sendRaw("ATSH7E0")
                 val rawCoolantResp = sendRaw("0105")
-                
-                // ИЗМЕНЕНО: ТЕПЕРЬ МЫ ВИДИМ СЫРОЙ ОТВЕТ АДАПТЕРА ПРЯМО НА ПАНЕЛИ
-                withContext(Dispatchers.Main) {
-                    connectionStatus.value = "ЭБУ: $rawCoolantResp" 
-                }
+                withContext(Dispatchers.Main) { connectionStatus.value = "ЭБУ: $rawCoolantResp" }
 
                 val coolant = (parseHex(rawCoolantResp, "4105") ?: 40) - 40
                 val mapKpa = parseHex(sendRaw("010B"), "410B") ?: baroKpa
@@ -341,16 +398,12 @@ class BmwElm327Driver {
                 if (chunk.contains(">")) break
             }
             return sb.toString().replace(">", "").replace(" ", "").replace("\r", "").replace("\n", "").trim()
-        } catch (e: Exception) {
-            return ""
-        }
+        } catch (e: Exception) { return "" }
     }
 
     private fun parseHex(raw: String, prefix: String): Int? {
         val idx = raw.indexOf(prefix)
-        if (idx != -1 && raw.length >= idx + prefix.length + 2) {
-            return raw.substring(idx + prefix.length, idx + prefix.length + 2).toIntOrNull(16)
-        }
+        if (idx != -1 && raw.length >= idx + prefix.length + 2) return raw.substring(idx + prefix.length, idx + prefix.length + 2).toIntOrNull(16)
         return null
     }
 
@@ -361,7 +414,7 @@ class BmwElm327Driver {
 }
 
 @Composable
-fun FullBmwDashboard(metrics: LiveMetrics, dragData: DragResult, status: String, onStatusClick: () -> Unit) {
+fun FullBmwDashboard(metrics: LiveMetrics, dragData: DragResult, status: String, onStatusClick: () -> Unit, onHistoryClick: () -> Unit) {
     Column(
         modifier = Modifier.fillMaxSize().background(Color(0xFF101010)).padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
@@ -374,9 +427,7 @@ fun FullBmwDashboard(metrics: LiveMetrics, dragData: DragResult, status: String,
             Text(
                 text = status,
                 color = if (status.contains("ОШИБКА")) Color.Red else if (status.contains("ЭБУ:")) Color.Cyan else Color.Yellow,
-                fontSize = 13.sp,
-                fontWeight = FontWeight.Bold,
-                textAlign = TextAlign.Center,
+                fontSize = 13.sp, fontWeight = FontWeight.Bold, textAlign = TextAlign.Center,
                 modifier = Modifier.fillMaxWidth().padding(16.dp)
             )
         }
@@ -386,29 +437,33 @@ fun FullBmwDashboard(metrics: LiveMetrics, dragData: DragResult, status: String,
             colors = CardDefaults.cardColors(containerColor = Color(0xFF1C1C1E)),
             modifier = Modifier.fillMaxWidth()
         ) {
-            Column(modifier = Modifier.padding(16.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+            Column(modifier = Modifier.padding(16.dp)) {
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                    Text(text = "DRAG METER", color = Color.Gray, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                    TextButton(onClick = { onHistoryClick() }) { Text("ИСТОРИЯ", color = Color.Cyan, fontSize = 12.sp, fontWeight = FontWeight.Bold) }
+                }
+                
                 Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                    Text(text = "0 - 100 KM/H DRAG", color = Color.Gray, fontSize = 12.sp, fontWeight = FontWeight.Bold)
-                    val statusText = when (dragData.state) {
-                        DragState.IDLE -> "ГОТОВ"
-                        DragState.MEASURING -> "ЗАМЕР..."
-                        DragState.FINISHED -> "ФИНИШ"
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Text("СКОРОСТЬ", color = Color.Gray, fontSize = 10.sp)
+                        Text("${dragData.currentSpeedKmH.toInt()}", fontSize = 42.sp, fontWeight = FontWeight.Black, color = Color.White)
                     }
-                    val statusColor = when (dragData.state) {
-                        DragState.IDLE -> Color.Yellow
-                        DragState.MEASURING -> Color.Green
-                        DragState.FINISHED -> Color.Cyan
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Text("ДИСТАНЦИЯ", color = Color.Gray, fontSize = 10.sp)
+                        Text("${dragData.distanceMeters.toInt()} м", fontSize = 42.sp, fontWeight = FontWeight.Black, color = Color.White)
                     }
-                    Text(text = statusText, color = statusColor, fontSize = 12.sp, fontWeight = FontWeight.Bold)
                 }
-                val displayTime = when (dragData.state) {
-                    DragState.FINISHED -> String.format("%.2f s", dragData.final0to100Sec ?: 0f)
-                    DragState.MEASURING -> String.format("%.1f s", dragData.elapsedTimeSec)
-                    DragState.IDLE -> "--.- s"
+                
+                Spacer(modifier = Modifier.height(12.dp))
+                HorizontalDivider(color = Color.DarkGray)
+                Spacer(modifier = Modifier.height(12.dp))
+
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
+                    TimeBox("0-60", dragData.time0to60)
+                    TimeBox("0-100", dragData.time0to100)
+                    TimeBox("100-200", dragData.time100to200)
+                    TimeBox("250 м", dragData.time250m)
                 }
-                val resultColor = if (dragData.state == DragState.FINISHED) Color.Green else Color.White
-                Text(text = displayTime, fontSize = 54.sp, fontWeight = FontWeight.Black, color = resultColor)
-                Text(text = "${dragData.currentSpeedKmH.toInt()} км/ч", fontSize = 20.sp, color = Color.LightGray)
             }
         }
 
@@ -422,6 +477,15 @@ fun FullBmwDashboard(metrics: LiveMetrics, dragData: DragResult, status: String,
             Box(modifier = Modifier.weight(1f)) { MiniGauge("ДВС МАСЛО", "${metrics.engineOil}", "°C", oilCol) }
             Box(modifier = Modifier.weight(1f)) { MiniGauge("АКПП МАСЛО", "${metrics.gearboxOil}", "°C", gearCol) }
         }
+    }
+}
+
+@Composable
+fun TimeBox(label: String, time: Float?) {
+    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+        Text(text = label, color = Color.Gray, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+        val displayTime = if (time != null) String.format("%.2f", time) else "--.--"
+        Text(text = displayTime, color = if (time != null) Color.Green else Color.White, fontSize = 16.sp, fontWeight = FontWeight.Bold)
     }
 }
 
