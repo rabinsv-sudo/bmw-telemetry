@@ -15,21 +15,25 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.Text
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import com.google.android.gms.location.*
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
@@ -72,26 +76,31 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         gpsTracker = GpsSpeedTracker(this)
-
         checkAndRequestPermissions()
 
         setContent {
             val metrics by elmDriver.metrics.collectAsState()
             val dragData by gpsTracker.dragData.collectAsState()
+            val connectionStatus by elmDriver.connectionStatus.collectAsState()
             val scope = rememberCoroutineScope()
+            val context = LocalContext.current
 
-            LaunchedEffect(Unit) {
-                val btManager = getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager
-                val adapter = btManager?.adapter
-                
-                // Исправлено: явно указали тип device: BluetoothDevice
-                val elmDevice = adapter?.bondedDevices?.firstOrNull { device: BluetoothDevice ->
-                    val devName = device.name ?: ""
-                    devName.contains("OBD", ignoreCase = true) || devName.contains("ELM", ignoreCase = true)
+            var showDialog by remember { mutableStateOf(false) }
+            var pairedDevices by remember { mutableStateOf<List<BluetoothDevice>>(emptyList()) }
+            var selectedDevice by remember { mutableStateOf<BluetoothDevice?>(null) }
+
+            LaunchedEffect(showDialog) {
+                if (showDialog) {
+                    val btManager = context.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager
+                    val adapter = btManager?.adapter
+                    pairedDevices = adapter?.bondedDevices?.toList() ?: emptyList()
                 }
+            }
 
-                elmDevice?.let { dev ->
+            LaunchedEffect(selectedDevice) {
+                selectedDevice?.let { dev ->
                     scope.launch {
+                        elmDriver.stop() // Останавливаем предыдущее, если было
                         elmDriver.startTelemetry(dev, EngineFamily.BMW_B_SERIES)
                     }
                 }
@@ -99,8 +108,48 @@ class MainActivity : ComponentActivity() {
 
             FullBmwDashboard(
                 metrics = metrics,
-                dragData = dragData
+                dragData = dragData,
+                status = connectionStatus,
+                onStatusClick = { showDialog = true }
             )
+
+            if (showDialog) {
+                AlertDialog(
+                    onDismissRequest = { showDialog = false },
+                    title = { Text("Выберите Bluetooth адаптер") },
+                    text = {
+                        Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
+                            if (pairedDevices.isEmpty()) {
+                                Text("Нет сопряженных устройств. Привяжите ELM327 в настройках телефона.", color = Color.Gray)
+                            }
+                            pairedDevices.forEach { device ->
+                                val name = device.name ?: "Неизвестное устройство"
+                                Column(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clickable {
+                                            selectedDevice = device
+                                            showDialog = false
+                                        }
+                                        .padding(vertical = 12.dp)
+                                ) {
+                                    Text(text = name, fontWeight = FontWeight.Bold, color = Color.White)
+                                    Text(text = device.address, fontSize = 12.sp, color = Color.Gray)
+                                }
+                                HorizontalDivider(color = Color.DarkGray)
+                            }
+                        }
+                    },
+                    confirmButton = {
+                        TextButton(onClick = { showDialog = false }) {
+                            Text("ОТМЕНА", color = Color.Red)
+                        }
+                    },
+                    containerColor = Color(0xFF1E1E1E),
+                    titleContentColor = Color.White,
+                    textContentColor = Color.White
+                )
+            }
         }
     }
 
@@ -190,7 +239,6 @@ class GpsSpeedTracker(context: Context) {
         val request = LocationRequest.Builder(Priority.PRIORITY_HIGH_ACCURACY, 200).setMinUpdateIntervalMillis(100).build()
         fusedClient.requestLocationUpdates(request, locationCallback, Looper.getMainLooper())
     }
-
     fun stopTracking() {
         fusedClient.removeLocationUpdates(locationCallback)
     }
@@ -205,15 +253,29 @@ class BmwElm327Driver {
     private val _metrics = MutableStateFlow(LiveMetrics())
     val metrics = _metrics.asStateFlow()
 
+    val connectionStatus = MutableStateFlow("НАЖМИТЕ СЮДА ДЛЯ ВЫБОРА АДАПТЕРА")
+
     @SuppressLint("MissingPermission")
     suspend fun startTelemetry(device: BluetoothDevice, engine: EngineFamily) = withContext(Dispatchers.IO) {
         try {
-            socket = device.createRfcommSocketToServiceRecord(sppUuid)
-            socket?.connect()
+            connectionStatus.value = "ПОДКЛЮЧЕНИЕ К ${device.name}..."
+            
+            try {
+                socket = device.createRfcommSocketToServiceRecord(sppUuid)
+                socket?.connect()
+            } catch (e: Exception) {
+                socket = device.createInsecureRfcommSocketToServiceRecord(sppUuid)
+                socket?.connect()
+            }
+            
             input = socket?.inputStream
             output = socket?.outputStream
 
+            connectionStatus.value = "СБРОС ELM327 (ATZ)..."
             sendRaw("ATZ")
+            delay(1000)
+
+            connectionStatus.value = "НАСТРОЙКА ПРОТОКОЛА..."
             sendRaw("ATE0")
             sendRaw("ATL0")
             sendRaw("ATS0")
@@ -226,6 +288,8 @@ class BmwElm327Driver {
             if (parsedBaro != null) {
                 baroKpa = parsedBaro
             }
+
+            connectionStatus.value = "ПОДКЛЮЧЕНО К ЭБУ. ЧТЕНИЕ..."
 
             while (socket?.isConnected == true) {
                 sendRaw("ATSH7E0")
@@ -247,8 +311,10 @@ class BmwElm327Driver {
                 val gearOil = if (gearRaw.contains("621E32")) (parseHex(gearRaw, "621E32") ?: 40) - 40 else 0
 
                 _metrics.value = LiveMetrics(coolant, engOil, gearOil, boost)
+                delay(200)
             }
         } catch (e: Exception) {
+            connectionStatus.value = "ОШИБКА: ${e.message?.uppercase()} (НАЖМИТЕ ДЛЯ ПОВТОРА)"
             stop()
         }
     }
@@ -256,18 +322,22 @@ class BmwElm327Driver {
     private fun sendRaw(cmd: String): String {
         val out = output ?: return ""
         val inp = input ?: return ""
-        out.write((cmd + "\r").toByteArray())
-        out.flush()
-        val buffer = ByteArray(128)
-        val sb = StringBuilder()
-        while (true) {
-            val len = inp.read(buffer)
-            if (len <= 0) break
-            val chunk = String(buffer, 0, len)
-            sb.append(chunk)
-            if (chunk.contains(">")) break
+        try {
+            out.write((cmd + "\r").toByteArray())
+            out.flush()
+            val buffer = ByteArray(128)
+            val sb = StringBuilder()
+            while (true) {
+                val len = inp.read(buffer)
+                if (len <= 0) break
+                val chunk = String(buffer, 0, len)
+                sb.append(chunk)
+                if (chunk.contains(">")) break
+            }
+            return sb.toString().replace(">", "").replace(" ", "").replace("\r", "").replace("\n", "").trim()
+        } catch (e: Exception) {
+            return ""
         }
-        return sb.toString().replace(">", "").replace(" ", "").replace("\r", "").replace("\n", "").trim()
     }
 
     private fun parseHex(raw: String, prefix: String): Int? {
@@ -285,11 +355,27 @@ class BmwElm327Driver {
 }
 
 @Composable
-fun FullBmwDashboard(metrics: LiveMetrics, dragData: DragResult) {
+fun FullBmwDashboard(metrics: LiveMetrics, dragData: DragResult, status: String, onStatusClick: () -> Unit) {
     Column(
         modifier = Modifier.fillMaxSize().background(Color(0xFF101010)).padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
+        // КЛИКАБЕЛЬНАЯ ПАНЕЛЬ СТАТУСА
+        Card(
+            shape = RoundedCornerShape(8.dp),
+            colors = CardDefaults.cardColors(containerColor = Color(0xFF1E1E1E)),
+            modifier = Modifier.fillMaxWidth().clickable { onStatusClick() }
+        ) {
+            Text(
+                text = status,
+                color = if (status.contains("ОШИБКА")) Color.Red else if (status.contains("ЧТЕНИЕ")) Color.Green else Color.Yellow,
+                fontSize = 13.sp,
+                fontWeight = FontWeight.Bold,
+                textAlign = TextAlign.Center,
+                modifier = Modifier.fillMaxWidth().padding(16.dp)
+            )
+        }
+
         Card(
             shape = RoundedCornerShape(16.dp),
             colors = CardDefaults.cardColors(containerColor = Color(0xFF1C1C1E)),
@@ -351,3 +437,4 @@ fun MiniGauge(title: String, value: String, unit: String, color: Color) {
         }
     }
 }
+
