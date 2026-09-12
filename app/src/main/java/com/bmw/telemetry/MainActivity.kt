@@ -333,38 +333,38 @@ class BmwElm327Driver {
             delay(500)
             sendRaw("ATAT1")
 
-            sendRaw("ATSH7DF")
+            sendRaw("ATSH7E0") 
             var baroKpa = 100
             val baroResp = sendRaw("0133")
             parseHex(baroResp, "4133")?.let { baroKpa = it }
 
-            // --- БЛОК АВТООПРЕДЕЛЕНИЯ ПРОТОКОЛА МАСЛА ---
-            connectionStatus.value = "ПОИСК ДАТЧИКА МАСЛА..."
-            var activeOilMethod = 0 // 1 = 015C (B47/Petrol), 2 = 22F45C (N47/Petrol UDS), 3 = 222002 (Old)
-            
-            sendRaw("ATSH7DF")
-            if (sendRaw("015C").contains("415C")) {
-                activeOilMethod = 1
-            } else {
-                sendRaw("ATSH7E0")
-                if (sendRaw("22F45C").contains("62F45C")) {
-                    activeOilMethod = 2
-                } else if (sendRaw("222002").contains("622002")) {
-                    activeOilMethod = 3
-                }
-            }
+            var activeOilMethod = 0
 
             while (socket?.isConnected == true) {
-                // 1. Охлаждающая жидкость и Наддув (Универсально)
-                sendRaw("ATSH7DF")
+                // 1. Охлаждающая жидкость и Наддув
+                sendRaw("ATSH7E0")
                 val rawCoolantResp = sendRaw("0105")
-                withContext(Dispatchers.Main) { connectionStatus.value = "АКТИВНО: $rawCoolantResp" }
+                
+                withContext(Dispatchers.Main) { 
+                    connectionStatus.value = "АКТИВНО | ОЖ: $rawCoolantResp | ТИП: $activeOilMethod" 
+                }
 
                 val coolant = (parseHex(rawCoolantResp, "4105") ?: 40) - 40
                 val mapKpa = parseHex(sendRaw("010B"), "410B") ?: baroKpa
                 val boost = ((mapKpa - baroKpa).coerceAtLeast(0)) / 100.0f
 
-                // 2. Опрос масла по найденному протоколу
+                // Динамический поиск протокола масла (если еще не найден)
+                if (activeOilMethod == 0) {
+                    sendRaw("ATSH7E0")
+                    if (sendRaw("22F45C").contains("62F45C")) activeOilMethod = 2
+                    else if (sendRaw("222002").contains("622002")) activeOilMethod = 3
+                    else {
+                        sendRaw("ATSH7DF")
+                        if (sendRaw("015C").contains("415C")) activeOilMethod = 1
+                    }
+                }
+
+                // 2. Масло ДВС
                 var engOil = 0
                 when (activeOilMethod) {
                     1 -> {
@@ -381,7 +381,7 @@ class BmwElm327Driver {
                     }
                 }
 
-                // 3. Запрос температуры масла АКПП (ZF)
+                // 3. АКПП (ZF)
                 sendRaw("ATSH7E1")
                 val gearRaw = sendRaw("221E32")
                 val gearOil = if (gearRaw.contains("621E32")) (parseHex(gearRaw, "621E32") ?: 40) - 40 else 0
@@ -439,7 +439,7 @@ fun FullBmwDashboard(metrics: LiveMetrics, dragData: DragResult, status: String,
         ) {
             Text(
                 text = status,
-                color = if (status.contains("ОШИБКА")) Color.Red else if (status.contains("АКТИВНО:")) Color.Cyan else Color.Yellow,
+                color = if (status.contains("ОШИБКА")) Color.Red else if (status.contains("АКТИВНО")) Color.Cyan else Color.Yellow,
                 fontSize = 13.sp, fontWeight = FontWeight.Bold, textAlign = TextAlign.Center,
                 modifier = Modifier.fillMaxWidth().padding(16.dp)
             )
@@ -455,6 +455,29 @@ fun FullBmwDashboard(metrics: LiveMetrics, dragData: DragResult, status: String,
                     Text(text = "DRAG METER", color = Color.Gray, fontSize = 12.sp, fontWeight = FontWeight.Bold)
                     TextButton(onClick = { onHistoryClick() }) { Text("ИСТОРИЯ", color = Color.Cyan, fontSize = 12.sp, fontWeight = FontWeight.Bold) }
                 }
+                
+                // --- ПЛАКАТ СТАТУСА ЗАМЕРА ---
+                val dragStatusText = when (dragData.state) {
+                    DragState.IDLE -> if (dragData.currentSpeedKmH < 3f) "ГОТОВ К СТАРТУ" else "ОЖИДАНИЕ ОСТАНОВКИ"
+                    DragState.MEASURING -> "ИДЕТ ЗАМЕР!"
+                }
+                val dragStatusBg = when (dragData.state) {
+                    DragState.IDLE -> if (dragData.currentSpeedKmH < 3f) Color(0xFF4CAF50) else Color(0xFFFF9800)
+                    DragState.MEASURING -> Color(0xFFF44336)
+                }
+                
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 8.dp)
+                        .background(dragStatusBg.copy(alpha = 0.2f), RoundedCornerShape(8.dp))
+                        .padding(vertical = 12.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(text = dragStatusText, color = dragStatusBg, fontWeight = FontWeight.Black, fontSize = 18.sp, letterSpacing = 1.sp)
+                }
+                
+                Spacer(modifier = Modifier.height(8.dp))
                 
                 Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
