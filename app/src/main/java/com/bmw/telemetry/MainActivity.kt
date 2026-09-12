@@ -90,11 +90,26 @@ class MainActivity : ComponentActivity() {
             val connectionStatus by elmDriver.connectionStatus.collectAsState()
             val scope = rememberCoroutineScope()
             val context = LocalContext.current
+            val sharedPrefs = context.getSharedPreferences("BmwTelemetryPrefs", Context.MODE_PRIVATE)
 
             var showDeviceDialog by remember { mutableStateOf(false) }
             var showHistoryDialog by remember { mutableStateOf(false) }
             var pairedDevices by remember { mutableStateOf<List<BluetoothDevice>>(emptyList()) }
             var selectedDevice by remember { mutableStateOf<BluetoothDevice?>(null) }
+
+            // Автоматическое подключение к последнему адаптеру при запуске
+            LaunchedEffect(Unit) {
+                val btManager = context.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager
+                val adapter = btManager?.adapter
+                val lastMac = sharedPrefs.getString("last_bt_mac", null)
+                
+                if (lastMac != null && adapter != null) {
+                    val dev = adapter.bondedDevices?.find { it.address == lastMac }
+                    if (dev != null) {
+                        selectedDevice = dev
+                    }
+                }
+            }
 
             LaunchedEffect(showDeviceDialog) {
                 if (showDeviceDialog) {
@@ -135,6 +150,8 @@ class MainActivity : ComponentActivity() {
                                 Column(
                                     modifier = Modifier.fillMaxWidth().clickable {
                                         selectedDevice = device
+                                        // Сохраняем MAC-адрес выбранного адаптера
+                                        sharedPrefs.edit().putString("last_bt_mac", device.address).apply()
                                         showDeviceDialog = false
                                     }.padding(vertical = 12.dp)
                                 ) {
@@ -333,7 +350,8 @@ class BmwElm327Driver {
             delay(500)
             sendRaw("ATAT1")
 
-            sendRaw("ATSH7E0") 
+            // Возвращаем широковещательный запрос для базовых датчиков OBD2
+            sendRaw("ATSH7DF") 
             var baroKpa = 100
             val baroResp = sendRaw("0133")
             parseHex(baroResp, "4133")?.let { baroKpa = it }
@@ -341,8 +359,8 @@ class BmwElm327Driver {
             var activeOilMethod = 0
 
             while (socket?.isConnected == true) {
-                // 1. Охлаждающая жидкость и Наддув
-                sendRaw("ATSH7E0")
+                // 1. Охлаждающая жидкость и Наддув (Универсально 7DF)
+                sendRaw("ATSH7DF")
                 val rawCoolantResp = sendRaw("0105")
                 
                 withContext(Dispatchers.Main) { 
@@ -353,7 +371,7 @@ class BmwElm327Driver {
                 val mapKpa = parseHex(sendRaw("010B"), "410B") ?: baroKpa
                 val boost = ((mapKpa - baroKpa).coerceAtLeast(0)) / 100.0f
 
-                // Динамический поиск протокола масла (если еще не найден)
+                // Динамический поиск протокола масла
                 if (activeOilMethod == 0) {
                     sendRaw("ATSH7E0")
                     if (sendRaw("22F45C").contains("62F45C")) activeOilMethod = 2
@@ -456,7 +474,6 @@ fun FullBmwDashboard(metrics: LiveMetrics, dragData: DragResult, status: String,
                     TextButton(onClick = { onHistoryClick() }) { Text("ИСТОРИЯ", color = Color.Cyan, fontSize = 12.sp, fontWeight = FontWeight.Bold) }
                 }
                 
-                // --- ПЛАКАТ СТАТУСА ЗАМЕРА ---
                 val dragStatusText = when (dragData.state) {
                     DragState.IDLE -> if (dragData.currentSpeedKmH < 3f) "ГОТОВ К СТАРТУ" else "ОЖИДАНИЕ ОСТАНОВКИ"
                     DragState.MEASURING -> "ИДЕТ ЗАМЕР!"
