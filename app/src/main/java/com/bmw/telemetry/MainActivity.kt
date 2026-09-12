@@ -43,7 +43,6 @@ import java.io.InputStream
 import java.io.OutputStream
 import java.util.UUID
 
-enum class EngineFamily { BMW_N_SERIES, BMW_B_SERIES }
 enum class DragState { IDLE, MEASURING }
 
 data class LiveMetrics(
@@ -109,7 +108,7 @@ class MainActivity : ComponentActivity() {
                 selectedDevice?.let { dev ->
                     scope.launch {
                         elmDriver.stop()
-                        elmDriver.startTelemetry(dev, EngineFamily.BMW_B_SERIES)
+                        elmDriver.startTelemetry(dev)
                     }
                 }
             }
@@ -221,7 +220,6 @@ class GpsSpeedTracker(context: Context) {
             val location = result.lastLocation ?: return
             val speedKmH = (location.speed * 3.6f).coerceAtLeast(0f)
             
-            // Используем время от GPS для точности
             val nowNano = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN_MR1) {
                 location.elapsedRealtimeNanos
             } else SystemClock.elapsedRealtimeNanos()
@@ -229,7 +227,6 @@ class GpsSpeedTracker(context: Context) {
             when (currentRun.state) {
                 DragState.IDLE -> {
                     if (speedKmH >= 3f) {
-                        // Старт замера
                         startTimeNano = nowNano
                         lastSpeedKmH = speedKmH
                         lastElapsedSec = 0f
@@ -238,7 +235,6 @@ class GpsSpeedTracker(context: Context) {
                         currentRun = DragResult(state = DragState.MEASURING, currentSpeedKmH = speedKmH)
                         _dragData.value = currentRun
                     } else {
-                        // Обновляем только скорость
                         _dragData.value = currentRun.copy(currentSpeedKmH = speedKmH)
                     }
                 }
@@ -252,7 +248,6 @@ class GpsSpeedTracker(context: Context) {
                     var t200 = currentRun.time100to200
                     var t250m = currentRun.time250m
 
-                    // Отсечки скорости
                     if (t60 == null && speedKmH >= 60f) t60 = interpolate(60f, lastSpeedKmH, speedKmH, lastElapsedSec, elapsedSec)
                     if (t100 == null && speedKmH >= 100f) t100 = interpolate(100f, lastSpeedKmH, speedKmH, lastElapsedSec, elapsedSec)
                     if (t200 == null && speedKmH >= 200f && t100 != null) {
@@ -260,21 +255,17 @@ class GpsSpeedTracker(context: Context) {
                         t200 = raw200 - t100
                     }
 
-                    // Отсечка дистанции 250м
                     if (t250m == null && newDist >= 250f) {
                         t250m = interpolate(250f, currentRun.distanceMeters, newDist, lastElapsedSec, elapsedSec)
                     }
 
-                    // Логика авто-сброса (если машина стоит > 5 секунд)
                     if (speedKmH < 3f) {
                         if (stopTimerStartNano == null) stopTimerStartNano = nowNano
                         else if ((nowNano - stopTimerStartNano!!) / 1_000_000_000f > 5f) {
-                            // Сохраняем результат, если есть хоть одна отсечка
                             if (t60 != null || t100 != null || t250m != null) {
                                 val finalRun = currentRun.copy(time0to60 = t60, time0to100 = t100, time100to200 = t200, time250m = t250m)
                                 _dragHistory.value = _dragHistory.value + finalRun
                             }
-                            // Сброс в IDLE
                             currentRun = DragResult(state = DragState.IDLE, currentSpeedKmH = speedKmH)
                             _dragData.value = currentRun
                             return
@@ -284,13 +275,8 @@ class GpsSpeedTracker(context: Context) {
                     }
 
                     currentRun = currentRun.copy(
-                        currentSpeedKmH = speedKmH,
-                        elapsedTimeSec = elapsedSec,
-                        distanceMeters = newDist,
-                        time0to60 = t60,
-                        time0to100 = t100,
-                        time100to200 = t200,
-                        time250m = t250m
+                        currentSpeedKmH = speedKmH, elapsedTimeSec = elapsedSec, distanceMeters = newDist,
+                        time0to60 = t60, time0to100 = t100, time100to200 = t200, time250m = t250m
                     )
 
                     lastSpeedKmH = speedKmH
@@ -321,7 +307,7 @@ class BmwElm327Driver {
     val connectionStatus = MutableStateFlow("НАЖМИТЕ СЮДА ДЛЯ ВЫБОРА АДАПТЕРА")
 
     @SuppressLint("MissingPermission")
-    suspend fun startTelemetry(device: BluetoothDevice, engine: EngineFamily) = withContext(Dispatchers.IO) {
+    suspend fun startTelemetry(device: BluetoothDevice) = withContext(Dispatchers.IO) {
         try {
             connectionStatus.value = "ПОДКЛЮЧЕНИЕ К ${device.name}..."
             try {
@@ -347,28 +333,55 @@ class BmwElm327Driver {
             delay(500)
             sendRaw("ATAT1")
 
+            sendRaw("ATSH7DF")
             var baroKpa = 100
             val baroResp = sendRaw("0133")
             parseHex(baroResp, "4133")?.let { baroKpa = it }
 
-            while (socket?.isConnected == true) {
+            // --- БЛОК АВТООПРЕДЕЛЕНИЯ ПРОТОКОЛА МАСЛА ---
+            connectionStatus.value = "ПОИСК ДАТЧИКА МАСЛА..."
+            var activeOilMethod = 0 // 1 = 015C (B47/Petrol), 2 = 22F45C (N47/Petrol UDS), 3 = 222002 (Old)
+            
+            sendRaw("ATSH7DF")
+            if (sendRaw("015C").contains("415C")) {
+                activeOilMethod = 1
+            } else {
                 sendRaw("ATSH7E0")
+                if (sendRaw("22F45C").contains("62F45C")) {
+                    activeOilMethod = 2
+                } else if (sendRaw("222002").contains("622002")) {
+                    activeOilMethod = 3
+                }
+            }
+
+            while (socket?.isConnected == true) {
+                // 1. Охлаждающая жидкость и Наддув (Универсально)
+                sendRaw("ATSH7DF")
                 val rawCoolantResp = sendRaw("0105")
-                withContext(Dispatchers.Main) { connectionStatus.value = "ЭБУ: $rawCoolantResp" }
+                withContext(Dispatchers.Main) { connectionStatus.value = "АКТИВНО: $rawCoolantResp" }
 
                 val coolant = (parseHex(rawCoolantResp, "4105") ?: 40) - 40
                 val mapKpa = parseHex(sendRaw("010B"), "410B") ?: baroKpa
                 val boost = ((mapKpa - baroKpa).coerceAtLeast(0)) / 100.0f
 
-                val engOil = when (engine) {
-                    EngineFamily.BMW_B_SERIES -> (parseHex(sendRaw("015C"), "415C") ?: 40) - 40
-                    EngineFamily.BMW_N_SERIES -> {
-                        val resp = sendRaw("22F45C")
-                        if (resp.contains("62F45C")) (parseHex(resp, "62F45C") ?: 40) - 40
-                        else (parseHex(sendRaw("222002"), "622002") ?: 40) - 40
+                // 2. Опрос масла по найденному протоколу
+                var engOil = 0
+                when (activeOilMethod) {
+                    1 -> {
+                        sendRaw("ATSH7DF")
+                        engOil = (parseHex(sendRaw("015C"), "415C") ?: 40) - 40
+                    }
+                    2 -> {
+                        sendRaw("ATSH7E0")
+                        engOil = (parseHex(sendRaw("22F45C"), "62F45C") ?: 40) - 40
+                    }
+                    3 -> {
+                        sendRaw("ATSH7E0")
+                        engOil = (parseHex(sendRaw("222002"), "622002") ?: 40) - 40
                     }
                 }
 
+                // 3. Запрос температуры масла АКПП (ZF)
                 sendRaw("ATSH7E1")
                 val gearRaw = sendRaw("221E32")
                 val gearOil = if (gearRaw.contains("621E32")) (parseHex(gearRaw, "621E32") ?: 40) - 40 else 0
@@ -426,7 +439,7 @@ fun FullBmwDashboard(metrics: LiveMetrics, dragData: DragResult, status: String,
         ) {
             Text(
                 text = status,
-                color = if (status.contains("ОШИБКА")) Color.Red else if (status.contains("ЭБУ:")) Color.Cyan else Color.Yellow,
+                color = if (status.contains("ОШИБКА")) Color.Red else if (status.contains("АКТИВНО:")) Color.Cyan else Color.Yellow,
                 fontSize = 13.sp, fontWeight = FontWeight.Bold, textAlign = TextAlign.Center,
                 modifier = Modifier.fillMaxWidth().padding(16.dp)
             )
