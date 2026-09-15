@@ -18,6 +18,8 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
@@ -27,6 +29,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -41,6 +44,9 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.InputStream
 import java.io.OutputStream
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 import java.util.UUID
 
 enum class DragState { IDLE, MEASURING }
@@ -58,10 +64,20 @@ data class DragResult(
     val elapsedTimeSec: Float = 0.0f,
     val distanceMeters: Float = 0f,
     val time0to60: Float? = null,
+    val dist0to60: Float? = null,
     val time0to100: Float? = null,
+    val dist0to100: Float? = null,
     val time100to200: Float? = null,
     val time250m: Float? = null,
     val timestamp: Long = System.currentTimeMillis()
+)
+
+class SensorConfig(
+    val name: String,
+    val header: String,
+    val command: String,
+    val expectedReply: String,
+    val offset: Int
 )
 
 @SuppressLint("MissingPermission")
@@ -87,7 +103,9 @@ class MainActivity : ComponentActivity() {
             val metrics by elmDriver.metrics.collectAsState()
             val dragData by gpsTracker.dragData.collectAsState()
             val history by gpsTracker.dragHistory.collectAsState()
+            val logs by elmDriver.logs.collectAsState()
             val connectionStatus by elmDriver.connectionStatus.collectAsState()
+            
             val scope = rememberCoroutineScope()
             val context = LocalContext.current
             val sharedPrefs = context.getSharedPreferences("BmwTelemetryPrefs", Context.MODE_PRIVATE)
@@ -96,26 +114,23 @@ class MainActivity : ComponentActivity() {
             var showHistoryDialog by remember { mutableStateOf(false) }
             var pairedDevices by remember { mutableStateOf<List<BluetoothDevice>>(emptyList()) }
             var selectedDevice by remember { mutableStateOf<BluetoothDevice?>(null) }
+            
+            var selectedTab by remember { mutableStateOf(0) }
 
-            // Автоматическое подключение к последнему адаптеру при запуске
             LaunchedEffect(Unit) {
                 val btManager = context.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager
                 val adapter = btManager?.adapter
                 val lastMac = sharedPrefs.getString("last_bt_mac", null)
-                
                 if (lastMac != null && adapter != null) {
                     val dev = adapter.bondedDevices?.find { it.address == lastMac }
-                    if (dev != null) {
-                        selectedDevice = dev
-                    }
+                    if (dev != null) selectedDevice = dev
                 }
             }
 
             LaunchedEffect(showDeviceDialog) {
                 if (showDeviceDialog) {
                     val btManager = context.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager
-                    val adapter = btManager?.adapter
-                    pairedDevices = adapter?.bondedDevices?.toList() ?: emptyList()
+                    pairedDevices = btManager?.adapter?.bondedDevices?.toList() ?: emptyList()
                 }
             }
 
@@ -123,18 +138,35 @@ class MainActivity : ComponentActivity() {
                 selectedDevice?.let { dev ->
                     scope.launch {
                         elmDriver.stop()
+                        delay(500)
                         elmDriver.startTelemetry(dev)
                     }
                 }
             }
 
-            FullBmwDashboard(
-                metrics = metrics,
-                dragData = dragData,
-                status = connectionStatus,
-                onStatusClick = { showDeviceDialog = true },
-                onHistoryClick = { showHistoryDialog = true }
-            )
+            Column(modifier = Modifier.fillMaxSize().background(Color(0xFF101010))) {
+                TabRow(
+                    selectedTabIndex = selectedTab,
+                    containerColor = Color(0xFF1E1E1E),
+                    contentColor = Color.Cyan
+                ) {
+                    Tab(selected = selectedTab == 0, onClick = { selectedTab = 0 }) {
+                        Text("ПРИБОРЫ", modifier = Modifier.padding(16.dp), fontWeight = FontWeight.Bold)
+                    }
+                    Tab(selected = selectedTab == 1, onClick = { selectedTab = 1 }) {
+                        Text("ЛОГ АДАПТЕРА", modifier = Modifier.padding(16.dp), fontWeight = FontWeight.Bold)
+                    }
+                }
+
+                if (selectedTab == 0) {
+                    FullBmwDashboard(
+                        metrics = metrics, dragData = dragData, status = connectionStatus,
+                        onStatusClick = { showDeviceDialog = true }, onHistoryClick = { showHistoryDialog = true }
+                    )
+                } else {
+                    LogsScreen(logs, onClear = { elmDriver.clearLogs() })
+                }
+            }
 
             if (showDeviceDialog) {
                 AlertDialog(
@@ -142,15 +174,12 @@ class MainActivity : ComponentActivity() {
                     title = { Text("Выберите Bluetooth адаптер") },
                     text = {
                         Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
-                            if (pairedDevices.isEmpty()) {
-                                Text("Нет сопряженных устройств. Привяжите ELM327 в настройках телефона.", color = Color.Gray)
-                            }
+                            if (pairedDevices.isEmpty()) Text("Нет сопряженных устройств.", color = Color.Gray)
                             pairedDevices.forEach { device ->
-                                val name = device.name ?: "Неизвестное устройство"
+                                val name = device.name ?: "Unknown"
                                 Column(
                                     modifier = Modifier.fillMaxWidth().clickable {
                                         selectedDevice = device
-                                        // Сохраняем MAC-адрес выбранного адаптера
                                         sharedPrefs.edit().putString("last_bt_mac", device.address).apply()
                                         showDeviceDialog = false
                                     }.padding(vertical = 12.dp)
@@ -177,8 +206,8 @@ class MainActivity : ComponentActivity() {
                             history.asReversed().forEachIndexed { index, run ->
                                 Column(modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp)) {
                                     Text("Заезд #${history.size - index}", fontWeight = FontWeight.Bold, color = Color.Cyan)
-                                    run.time0to60?.let { Text("0-60: ${String.format("%.2f", it)} s", color = Color.White) }
-                                    run.time0to100?.let { Text("0-100: ${String.format("%.2f", it)} s", color = Color.White) }
+                                    run.time0to60?.let { Text("0-60: ${String.format("%.2f", it)} s (${run.dist0to60?.toInt()} м)", color = Color.White) }
+                                    run.time0to100?.let { Text("0-100: ${String.format("%.2f", it)} s (${run.dist0to100?.toInt()} м)", color = Color.White) }
                                     run.time100to200?.let { Text("100-200: ${String.format("%.2f", it)} s", color = Color.White) }
                                     run.time250m?.let { Text("250 м: ${String.format("%.2f", it)} s", color = Color.White) }
                                 }
@@ -210,6 +239,26 @@ class MainActivity : ComponentActivity() {
     }
 }
 
+@Composable
+fun LogsScreen(logs: List<String>, onClear: () -> Unit) {
+    Column(modifier = Modifier.fillMaxSize().padding(8.dp)) {
+        Button(onClick = onClear, modifier = Modifier.fillMaxWidth()) { Text("ОЧИСТИТЬ ЛОГ") }
+        Spacer(modifier = Modifier.height(8.dp))
+        LazyColumn(modifier = Modifier.fillMaxSize().background(Color.Black)) {
+            items(logs) { logMsg ->
+                Text(
+                    text = logMsg,
+                    color = if (logMsg.contains("ERR") || logMsg.contains("NODATA") || logMsg.contains("FAIL")) Color.Red else Color.Green,
+                    fontSize = 11.sp,
+                    fontFamily = FontFamily.Monospace,
+                    modifier = Modifier.padding(vertical = 2.dp)
+                )
+                HorizontalDivider(color = Color.DarkGray, thickness = 0.5.dp)
+            }
+        }
+    }
+}
+
 class GpsSpeedTracker(context: Context) {
     private val fusedClient = LocationServices.getFusedLocationProviderClient(context)
     
@@ -227,9 +276,14 @@ class GpsSpeedTracker(context: Context) {
     private var currentRun = DragResult()
     private var stopTimerStartNano: Long? = null
 
-    private fun interpolate(target: Float, v1: Float, v2: Float, t1: Float, t2: Float): Float {
+    private fun interpolateTime(target: Float, v1: Float, v2: Float, t1: Float, t2: Float): Float {
         if (v2 <= v1) return t2
         return t1 + (t2 - t1) * ((target - v1) / (v2 - v1))
+    }
+    
+    private fun interpolateDist(target: Float, v1: Float, v2: Float, d1: Float, d2: Float): Float {
+        if (v2 <= v1) return d2
+        return d1 + (d2 - d1) * ((target - v1) / (v2 - v1))
     }
 
     private val locationCallback = object : LocationCallback() {
@@ -261,26 +315,32 @@ class GpsSpeedTracker(context: Context) {
                     val newDist = currentRun.distanceMeters + distStep
 
                     var t60 = currentRun.time0to60
+                    var d60 = currentRun.dist0to60
                     var t100 = currentRun.time0to100
+                    var d100 = currentRun.dist0to100
                     var t200 = currentRun.time100to200
                     var t250m = currentRun.time250m
 
-                    if (t60 == null && speedKmH >= 60f) t60 = interpolate(60f, lastSpeedKmH, speedKmH, lastElapsedSec, elapsedSec)
-                    if (t100 == null && speedKmH >= 100f) t100 = interpolate(100f, lastSpeedKmH, speedKmH, lastElapsedSec, elapsedSec)
-                    if (t200 == null && speedKmH >= 200f && t100 != null) {
-                        val raw200 = interpolate(200f, lastSpeedKmH, speedKmH, lastElapsedSec, elapsedSec)
-                        t200 = raw200 - t100
+                    if (t60 == null && speedKmH >= 60f) {
+                        t60 = interpolateTime(60f, lastSpeedKmH, speedKmH, lastElapsedSec, elapsedSec)
+                        d60 = interpolateDist(60f, lastSpeedKmH, speedKmH, currentRun.distanceMeters, newDist)
                     }
-
+                    if (t100 == null && speedKmH >= 100f) {
+                        t100 = interpolateTime(100f, lastSpeedKmH, speedKmH, lastElapsedSec, elapsedSec)
+                        d100 = interpolateDist(100f, lastSpeedKmH, speedKmH, currentRun.distanceMeters, newDist)
+                    }
+                    if (t200 == null && speedKmH >= 200f && t100 != null) {
+                        t200 = interpolateTime(200f, lastSpeedKmH, speedKmH, lastElapsedSec, elapsedSec) - t100
+                    }
                     if (t250m == null && newDist >= 250f) {
-                        t250m = interpolate(250f, currentRun.distanceMeters, newDist, lastElapsedSec, elapsedSec)
+                        t250m = interpolateTime(250f, currentRun.distanceMeters, newDist, lastElapsedSec, elapsedSec)
                     }
 
                     if (speedKmH < 3f) {
                         if (stopTimerStartNano == null) stopTimerStartNano = nowNano
                         else if ((nowNano - stopTimerStartNano!!) / 1_000_000_000f > 5f) {
                             if (t60 != null || t100 != null || t250m != null) {
-                                val finalRun = currentRun.copy(time0to60 = t60, time0to100 = t100, time100to200 = t200, time250m = t250m)
+                                val finalRun = currentRun.copy(time0to60 = t60, dist0to60 = d60, time0to100 = t100, dist0to100 = d100, time100to200 = t200, time250m = t250m)
                                 _dragHistory.value = _dragHistory.value + finalRun
                             }
                             currentRun = DragResult(state = DragState.IDLE, currentSpeedKmH = speedKmH)
@@ -293,7 +353,7 @@ class GpsSpeedTracker(context: Context) {
 
                     currentRun = currentRun.copy(
                         currentSpeedKmH = speedKmH, elapsedTimeSec = elapsedSec, distanceMeters = newDist,
-                        time0to60 = t60, time0to100 = t100, time100to200 = t200, time250m = t250m
+                        time0to60 = t60, dist0to60 = d60, time0to100 = t100, dist0to100 = d100, time100to200 = t200, time250m = t250m
                     )
 
                     lastSpeedKmH = speedKmH
@@ -318,127 +378,196 @@ class BmwElm327Driver {
     private var socket: BluetoothSocket? = null
     private var input: InputStream? = null
     private var output: OutputStream? = null
+    
+    @Volatile private var isRunning = false
 
     private val _metrics = MutableStateFlow(LiveMetrics())
     val metrics = _metrics.asStateFlow()
-    val connectionStatus = MutableStateFlow("НАЖМИТЕ СЮДА ДЛЯ ВЫБОРА АДАПТЕРА")
+    
+    val connectionStatus = MutableStateFlow("ОЖИДАНИЕ АДАПТЕРА")
+    
+    private val _logs = MutableStateFlow<List<String>>(emptyList())
+    val logs = _logs.asStateFlow()
+
+    private fun addLog(msg: String) {
+        val time = SimpleDateFormat("HH:mm:ss.SSS", Locale.getDefault()).format(Date())
+        _logs.value = (listOf("[$time] $msg") + _logs.value).take(150)
+    }
+    
+    fun clearLogs() {
+        _logs.value = emptyList()
+    }
 
     @SuppressLint("MissingPermission")
     suspend fun startTelemetry(device: BluetoothDevice) = withContext(Dispatchers.IO) {
-        try {
-            connectionStatus.value = "ПОДКЛЮЧЕНИЕ К ${device.name}..."
+        isRunning = true
+        while (isRunning) {
             try {
-                socket = device.createRfcommSocketToServiceRecord(sppUuid)
-                socket?.connect()
+                connectionStatus.value = "ПОДКЛЮЧЕНИЕ..."
+                addLog("=== СТАРТ ПОДКЛЮЧЕНИЯ ===")
+                addLog("MAC: ${device.address}")
+                
+                try {
+                    socket = device.createRfcommSocketToServiceRecord(sppUuid)
+                    socket?.connect()
+                    addLog("Подключено через безопасный сокет")
+                } catch (e: Exception) {
+                    addLog("Безопасный сокет ERR: ${e.message}. Пробуем Insecure...")
+                    socket = device.createInsecureRfcommSocketToServiceRecord(sppUuid)
+                    socket?.connect()
+                    addLog("Подключено через Insecure сокет")
+                }
+                
+                input = socket?.inputStream
+                output = socket?.outputStream
+
+                connectionStatus.value = "ИНИЦИАЛИЗАЦИЯ ELM327..."
+                sendRaw("ATZ", 1000)
+                sendRaw("ATE0")
+                sendRaw("ATL0")
+                sendRaw("ATS0")
+                
+                // Пробуем жестко задать CAN 11bit 500k (самый частый для BMW)
+                sendRaw("ATSP6") 
+                delay(200)
+                sendRaw("ATAT1")
+
+                connectionStatus.value = "ПОИСК ПРОТОКОЛОВ ЭБУ..."
+                addLog("--- СКАНИРОВАНИЕ ДАТЧИКОВ ---")
+
+                // 1. Поиск датчика антифриза
+                var coolantConf: SensorConfig? = null
+                val coolantCandidates = listOf(
+                    SensorConfig("COOLANT_OBD", "ATSH7DF", "0105", "4105", 40),
+                    SensorConfig("COOLANT_BMW", "ATSH7E0", "22F405", "62F405", 40)
+                )
+                for (cand in coolantCandidates) {
+                    sendRaw(cand.header)
+                    val res = sendRaw(cand.command)
+                    if (res.contains(cand.expectedReply)) {
+                        coolantConf = cand
+                        addLog("НАЙДЕН ОЖ: ${cand.name}")
+                        break
+                    }
+                }
+
+                // 2. Поиск датчика масла ДВС
+                var oilConf: SensorConfig? = null
+                val oilCandidates = listOf(
+                    SensorConfig("OIL_OBD", "ATSH7DF", "015C", "415C", 40),
+                    SensorConfig("OIL_BMW_B", "ATSH7E0", "22F45C", "62F45C", 40),
+                    SensorConfig("OIL_BMW_OLD", "ATSH7E0", "222002", "622002", 40)
+                )
+                for (cand in oilCandidates) {
+                    sendRaw(cand.header)
+                    val res = sendRaw(cand.command)
+                    if (res.contains(cand.expectedReply)) {
+                        oilConf = cand
+                        addLog("НАЙДЕНО МАСЛО: ${cand.name}")
+                        break
+                    }
+                }
+                
+                // Барометр (единожды)
+                sendRaw("ATSH7DF")
+                var baroKpa = 100
+                val baroResp = sendRaw("0133")
+                parseHex(baroResp, "4133")?.let { baroKpa = it }
+
+                connectionStatus.value = "ОПРОС ДАННЫХ..."
+                addLog("--- СТАРТ ЦИКЛА ОПРОСА ---")
+
+                while (socket?.isConnected == true && isRunning) {
+                    var currentCoolant = _metrics.value.coolant
+                    var currentOil = _metrics.value.engineOil
+                    
+                    // Читаем ОЖ
+                    if (coolantConf != null) {
+                        sendRaw(coolantConf.header)
+                        val res = sendRaw(coolantConf.command)
+                        parseHex(res, coolantConf.expectedReply)?.let { currentCoolant = it - coolantConf.offset }
+                    }
+                    
+                    // Буст (универсальный)
+                    sendRaw("ATSH7DF")
+                    val mapKpa = parseHex(sendRaw("010B"), "410B") ?: baroKpa
+                    val boost = ((mapKpa - baroKpa).coerceAtLeast(0)) / 100.0f
+                    
+                    // Читаем масло
+                    if (oilConf != null) {
+                        sendRaw(oilConf.header)
+                        val res = sendRaw(oilConf.command)
+                        parseHex(res, oilConf.expectedReply)?.let { currentOil = it - oilConf.offset }
+                    }
+
+                    // Читаем коробку
+                    sendRaw("ATSH7E1")
+                    val gearRaw = sendRaw("221E32")
+                    val gearOil = if (gearRaw.contains("621E32")) (parseHex(gearRaw, "621E32") ?: 40) - 40 else 0
+
+                    _metrics.value = LiveMetrics(currentCoolant, currentOil, gearOil, boost)
+                    delay(250)
+                }
             } catch (e: Exception) {
-                socket = device.createInsecureRfcommSocketToServiceRecord(sppUuid)
-                socket?.connect()
+                val err = e.message ?: "Неизвестная ошибка"
+                addLog("КРИТ. ОШИБКА: $err")
+                withContext(Dispatchers.Main) { connectionStatus.value = "СБОЙ СВЯЗИ. ПЕРЕПОДКЛЮЧЕНИЕ..." }
+                try { socket?.close() } catch (ex: Exception) {}
+                socket = null
             }
             
-            input = socket?.inputStream
-            output = socket?.outputStream
-
-            connectionStatus.value = "СБРОС ELM327 (ATZ)..."
-            sendRaw("ATZ")
-            delay(1000)
-
-            connectionStatus.value = "НАСТРОЙКА ПРОТОКОЛА..."
-            sendRaw("ATE0")
-            sendRaw("ATL0")
-            sendRaw("ATS0")
-            sendRaw("ATSP0") 
-            delay(500)
-            sendRaw("ATAT1")
-
-            // Возвращаем широковещательный запрос для базовых датчиков OBD2
-            sendRaw("ATSH7DF") 
-            var baroKpa = 100
-            val baroResp = sendRaw("0133")
-            parseHex(baroResp, "4133")?.let { baroKpa = it }
-
-            var activeOilMethod = 0
-
-            while (socket?.isConnected == true) {
-                // 1. Охлаждающая жидкость и Наддув (Универсально 7DF)
-                sendRaw("ATSH7DF")
-                val rawCoolantResp = sendRaw("0105")
-                
-                withContext(Dispatchers.Main) { 
-                    connectionStatus.value = "АКТИВНО | ОЖ: $rawCoolantResp | ТИП: $activeOilMethod" 
-                }
-
-                val coolant = (parseHex(rawCoolantResp, "4105") ?: 40) - 40
-                val mapKpa = parseHex(sendRaw("010B"), "410B") ?: baroKpa
-                val boost = ((mapKpa - baroKpa).coerceAtLeast(0)) / 100.0f
-
-                // Динамический поиск протокола масла
-                if (activeOilMethod == 0) {
-                    sendRaw("ATSH7E0")
-                    if (sendRaw("22F45C").contains("62F45C")) activeOilMethod = 2
-                    else if (sendRaw("222002").contains("622002")) activeOilMethod = 3
-                    else {
-                        sendRaw("ATSH7DF")
-                        if (sendRaw("015C").contains("415C")) activeOilMethod = 1
-                    }
-                }
-
-                // 2. Масло ДВС
-                var engOil = 0
-                when (activeOilMethod) {
-                    1 -> {
-                        sendRaw("ATSH7DF")
-                        engOil = (parseHex(sendRaw("015C"), "415C") ?: 40) - 40
-                    }
-                    2 -> {
-                        sendRaw("ATSH7E0")
-                        engOil = (parseHex(sendRaw("22F45C"), "62F45C") ?: 40) - 40
-                    }
-                    3 -> {
-                        sendRaw("ATSH7E0")
-                        engOil = (parseHex(sendRaw("222002"), "622002") ?: 40) - 40
-                    }
-                }
-
-                // 3. АКПП (ZF)
-                sendRaw("ATSH7E1")
-                val gearRaw = sendRaw("221E32")
-                val gearOil = if (gearRaw.contains("621E32")) (parseHex(gearRaw, "621E32") ?: 40) - 40 else 0
-
-                _metrics.value = LiveMetrics(coolant, engOil, gearOil, boost)
-                delay(200)
+            // Если мы всё ещё должны работать (не нажали Стоп руками), ждем и переподключаемся
+            if (isRunning) {
+                addLog("Пауза 3 сек перед авто-реконнектом...")
+                delay(3000)
             }
-        } catch (e: Exception) {
-            connectionStatus.value = "ОШИБКА: ${e.message?.uppercase()} (НАЖМИТЕ ДЛЯ ПОВТОРА)"
-            stop()
         }
     }
 
-    private fun sendRaw(cmd: String): String {
-        val out = output ?: return ""
-        val inp = input ?: return ""
+    private fun sendRaw(cmd: String, overrideDelay: Long = 0): String {
+        val out = output ?: return "ERR_NO_OUT"
+        val inp = input ?: return "ERR_NO_IN"
         try {
             out.write((cmd + "\r").toByteArray())
             out.flush()
-            val buffer = ByteArray(128)
+            if (overrideDelay > 0) Thread.sleep(overrideDelay)
+            
+            val buffer = ByteArray(256)
             val sb = StringBuilder()
+            var noDataCounter = 0
+            
             while (true) {
-                val len = inp.read(buffer)
-                if (len <= 0) break
-                val chunk = String(buffer, 0, len)
-                sb.append(chunk)
-                if (chunk.contains(">")) break
+                if (inp.available() > 0) {
+                    val len = inp.read(buffer)
+                    if (len <= 0) break
+                    val chunk = String(buffer, 0, len)
+                    sb.append(chunk)
+                    if (chunk.contains(">")) break
+                } else {
+                    noDataCounter++
+                    if (noDataCounter > 10) break // Таймаут чтения ~1 сек
+                    Thread.sleep(100)
+                }
             }
-            return sb.toString().replace(">", "").replace(" ", "").replace("\r", "").replace("\n", "").trim()
-        } catch (e: Exception) { return "" }
+            val res = sb.toString().replace(">", "").replace(" ", "").replace("\r", "").replace("\n", "").trim()
+            addLog("CMD: $cmd | RES: $res")
+            return res
+        } catch (e: Exception) {
+            addLog("IO_ERR на команде $cmd")
+            return "ERR_IO"
+        }
     }
 
     private fun parseHex(raw: String, prefix: String): Int? {
         val idx = raw.indexOf(prefix)
-        if (idx != -1 && raw.length >= idx + prefix.length + 2) return raw.substring(idx + prefix.length, idx + prefix.length + 2).toIntOrNull(16)
+        if (idx != -1 && raw.length >= idx + prefix.length + 2) {
+            return raw.substring(idx + prefix.length, idx + prefix.length + 2).toIntOrNull(16)
+        }
         return null
     }
 
     fun stop() {
+        isRunning = false
         try { socket?.close() } catch (e: Exception) {}
         socket = null
     }
@@ -447,7 +576,7 @@ class BmwElm327Driver {
 @Composable
 fun FullBmwDashboard(metrics: LiveMetrics, dragData: DragResult, status: String, onStatusClick: () -> Unit, onHistoryClick: () -> Unit) {
     Column(
-        modifier = Modifier.fillMaxSize().background(Color(0xFF101010)).padding(16.dp),
+        modifier = Modifier.fillMaxSize().padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
         Card(
@@ -457,7 +586,7 @@ fun FullBmwDashboard(metrics: LiveMetrics, dragData: DragResult, status: String,
         ) {
             Text(
                 text = status,
-                color = if (status.contains("ОШИБКА")) Color.Red else if (status.contains("АКТИВНО")) Color.Cyan else Color.Yellow,
+                color = if (status.contains("СБОЙ") || status.contains("ОШИБКА")) Color.Red else if (status.contains("ОПРОС")) Color.Cyan else Color.Yellow,
                 fontSize = 13.sp, fontWeight = FontWeight.Bold, textAlign = TextAlign.Center,
                 modifier = Modifier.fillMaxWidth().padding(16.dp)
             )
@@ -484,11 +613,7 @@ fun FullBmwDashboard(metrics: LiveMetrics, dragData: DragResult, status: String,
                 }
                 
                 Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(vertical = 8.dp)
-                        .background(dragStatusBg.copy(alpha = 0.2f), RoundedCornerShape(8.dp))
-                        .padding(vertical = 12.dp),
+                    modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp).background(dragStatusBg.copy(alpha = 0.2f), RoundedCornerShape(8.dp)).padding(vertical = 12.dp),
                     contentAlignment = Alignment.Center
                 ) {
                     Text(text = dragStatusText, color = dragStatusBg, fontWeight = FontWeight.Black, fontSize = 18.sp, letterSpacing = 1.sp)
