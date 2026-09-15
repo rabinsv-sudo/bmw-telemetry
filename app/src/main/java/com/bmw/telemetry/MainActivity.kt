@@ -98,7 +98,7 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         
-        // ВАЖНО: Делаем так, чтобы экран никогда не гас
+        // Экран всегда включен
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         
         gpsTracker = GpsSpeedTracker(this)
@@ -122,6 +122,7 @@ class MainActivity : ComponentActivity() {
             
             var selectedTab by remember { mutableStateOf(0) }
 
+            // Авто-подключение к последнему адаптеру
             LaunchedEffect(Unit) {
                 val btManager = context.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager
                 val adapter = btManager?.adapter
@@ -259,7 +260,7 @@ fun LogsScreen(logs: List<String>, onClear: () -> Unit) {
             items(logs) { logMsg ->
                 Text(
                     text = logMsg,
-                    color = if (logMsg.contains("ERR") || logMsg.contains("NODATA") || logMsg.contains("ОШИБКА")) Color.Red else if (logMsg.contains("CMD:")) Color.LightGray else Color.Green,
+                    color = if (logMsg.contains("ERR") || logMsg.contains("NODATA") || logMsg.contains("ОШИБКА")) Color.Red else if (logMsg.contains("CMD:") || logMsg.contains("ПОИСК")) Color.LightGray else if (logMsg.contains("НАЙДЕН")) Color.Yellow else Color.Green,
                     fontSize = 11.sp,
                     fontFamily = FontFamily.Monospace,
                     modifier = Modifier.padding(vertical = 4.dp)
@@ -416,7 +417,6 @@ class BmwElm327Driver {
             try {
                 connectionStatus.value = "ПОДКЛЮЧЕНИЕ..."
                 addLog("=== СТАРТ ПОДКЛЮЧЕНИЯ ===")
-                addLog("MAC: ${device.address}")
                 
                 try {
                     socket = device.createRfcommSocketToServiceRecord(sppUuid)
@@ -437,107 +437,138 @@ class BmwElm327Driver {
                 sendRaw("ATE0")
                 sendRaw("ATL0")
                 sendRaw("ATS0")
-                sendRaw("ATH0") 
+                sendRaw("ATH0")
                 
                 sendRaw("ATSP0") 
                 delay(500)
                 sendRaw("ATAT1")
 
-                connectionStatus.value = "ПОИСК ПРОТОКОЛОВ ЭБУ..."
-                addLog("--- СКАНИРОВАНИЕ ДАТЧИКОВ ---")
-
-                // 1. Поиск антифриза
-                var coolantConf: SensorConfig? = null
+                // --- БАЗЫ ДАННЫХ BMW ---
+                
+                // Антифриз
                 val coolantCandidates = listOf(
                     SensorConfig("COOLANT_OBD", "ATSH7DF", "0105", "4105", 40),
-                    SensorConfig("COOLANT_BMW", "ATSH7E0", "22F405", "62F405", 40)
+                    SensorConfig("COOLANT_DME", "ATSH7E0", "0105", "4105", 40),
+                    SensorConfig("COOLANT_UDS", "ATSH7E0", "22F405", "62F405", 40)
                 )
-                for (cand in coolantCandidates) {
-                    sendRaw(cand.header)
-                    val res = sendRaw(cand.command)
-                    if (res.contains(cand.expectedReply)) {
-                        coolantConf = cand
-                        addLog("НАЙДЕН ОЖ: ${cand.name}")
-                        break
-                    }
-                }
-
-                // 2. Поиск масла (расширенный список для N47, B47, Бензин)
-                var oilConf: SensorConfig? = null
-                val oilCandidates = listOf(
-                    SensorConfig("OIL_OBD", "ATSH7DF", "015C", "415C", 40),
-                    SensorConfig("OIL_UDS_1", "ATSH7E0", "22F45C", "62F45C", 40),
-                    SensorConfig("OIL_UDS_2", "ATSH7E0", "22F446", "62F446", 40),
-                    SensorConfig("OIL_N47_1", "ATSH7E0", "221310", "621310", 40),
-                    SensorConfig("OIL_N47_2", "ATSH7E0", "22115A", "62115A", 40),
-                    SensorConfig("OIL_KWP", "ATSH7E0", "222002", "622002", 40)
-                )
-                for (cand in oilCandidates) {
-                    sendRaw(cand.header)
-                    val res = sendRaw(cand.command)
-                    if (res.contains(cand.expectedReply)) {
-                        oilConf = cand
-                        addLog("НАЙДЕНО МАСЛО: ${cand.name}")
-                        break
-                    }
-                }
+                var coolantConf: SensorConfig? = null
+                var coolantIdx = 0
                 
-                // 3. Поиск АКПП (включая ZF8 на адресе 7E2 и ZF6)
-                var gearConf: SensorConfig? = null
+                // Наддув
+                val boostCandidates = listOf(
+                    SensorConfig("BOOST_OBD", "ATSH7DF", "010B", "410B", 0),
+                    SensorConfig("BOOST_DME", "ATSH7E0", "010B", "410B", 0)
+                )
+                var boostConf: SensorConfig? = null
+                var boostIdx = 0
+
+                // Масло ДВС
+                val oilCandidates = listOf(
+                    SensorConfig("OIL_B_SERIES", "ATSH7E0", "22F446", "62F446", 40), // B47/B58
+                    SensorConfig("OIL_G_SERIES", "ATSH7E0", "22A04A", "62A04A", 40), // G-кузова
+                    SensorConfig("OIL_N_SERIES", "ATSH7E0", "22F45C", "62F45C", 40), // N47/N20
+                    SensorConfig("OIL_ALT_N47", "ATSH7E0", "22115A", "62115A", 40),
+                    SensorConfig("OIL_OLD_KWP", "ATSH7E0", "222002", "622002", 40),
+                    SensorConfig("OIL_OBD_STD", "ATSH7DF", "015C", "415C", 40)
+                )
+                var oilConf: SensorConfig? = null
+                var oilIdx = 0
+
+                // АКПП
                 val gearCandidates = listOf(
                     SensorConfig("GEAR_ZF8_7E1", "ATSH7E1", "221E32", "621E32", 40),
-                    SensorConfig("GEAR_ZF8_7E2", "ATSH7E2", "221E32", "621E32", 40),
-                    SensorConfig("GEAR_ZF6", "ATSH7E1", "221A3E", "621A3E", 40),
-                    SensorConfig("GEAR_AISIN", "ATSH7E1", "221624", "621624", 40),
-                    SensorConfig("GEAR_DKG", "ATSH7E1", "221E15", "621E15", 40)
+                    SensorConfig("GEAR_ZF8_7E2", "ATSH7E2", "221E32", "621E32", 40), // Иногда G-серия тут
+                    SensorConfig("GEAR_G_UDS_1", "ATSH7E1", "22A04B", "62A04B", 40),
+                    SensorConfig("GEAR_G_UDS_2", "ATSH7E2", "22A04B", "62A04B", 40),
+                    SensorConfig("GEAR_ZF6", "ATSH7E1", "221A3E", "621A3E", 40)
                 )
-                for (cand in gearCandidates) {
-                    sendRaw(cand.header)
-                    val res = sendRaw(cand.command)
-                    if (res.contains(cand.expectedReply)) {
-                        gearConf = cand
-                        addLog("НАЙДЕНА АКПП: ${cand.name}")
-                        break
-                    }
-                }
+                var gearConf: SensorConfig? = null
+                var gearIdx = 0
 
+                // Барометр
                 sendRaw("ATSH7DF")
                 var baroKpa = 100
                 val baroResp = sendRaw("0133")
                 parseHex(baroResp, "4133")?.let { baroKpa = it }
 
-                connectionStatus.value = "АКТИВНО | ОПРОС ДАННЫХ"
+                connectionStatus.value = "АКТИВНО | СКАНИРОВАНИЕ..."
                 addLog("--- СТАРТ ЦИКЛА ОПРОСА ---")
 
                 while (socket?.isConnected == true && isRunning) {
                     var currentCoolant = _metrics.value.coolant
                     var currentOil = _metrics.value.engineOil
                     var currentGear = _metrics.value.gearboxOil
+                    var currentBoost = _metrics.value.boostBar
                     
-                    if (coolantConf != null) {
+                    // --- ДИНАМИЧЕСКИЙ ОПРОС ---
+
+                    // 1. АНТИФРИЗ
+                    if (coolantConf == null) {
+                        val cand = coolantCandidates[coolantIdx]
+                        addLog("ПОИСК ОЖ: ${cand.name}")
+                        sendRaw(cand.header)
+                        if (sendRaw(cand.command).contains(cand.expectedReply)) {
+                            coolantConf = cand
+                            addLog(">>> НАЙДЕН ОЖ: ${cand.name}")
+                        } else {
+                            coolantIdx = (coolantIdx + 1) % coolantCandidates.size
+                        }
+                    } else {
                         sendRaw(coolantConf.header)
-                        val res = sendRaw(coolantConf.command)
-                        parseHex(res, coolantConf.expectedReply)?.let { currentCoolant = it - coolantConf.offset }
+                        parseHex(sendRaw(coolantConf.command), coolantConf.expectedReply)?.let { currentCoolant = it - coolantConf.offset }
                     }
-                    
-                    sendRaw("ATSH7DF")
-                    val mapKpa = parseHex(sendRaw("010B"), "410B") ?: baroKpa
-                    val boost = ((mapKpa - baroKpa).coerceAtLeast(0)) / 100.0f
-                    
-                    if (oilConf != null) {
+
+                    // 2. НАДДУВ
+                    if (boostConf == null) {
+                        val cand = boostCandidates[boostIdx]
+                        addLog("ПОИСК НАДДУВА: ${cand.name}")
+                        sendRaw(cand.header)
+                        if (sendRaw(cand.command).contains(cand.expectedReply)) {
+                            boostConf = cand
+                            addLog(">>> НАЙДЕН НАДДУВ: ${cand.name}")
+                        } else {
+                            boostIdx = (boostIdx + 1) % boostCandidates.size
+                        }
+                    } else {
+                        sendRaw(boostConf.header)
+                        val mapKpa = parseHex(sendRaw(boostConf.command), boostConf.expectedReply) ?: baroKpa
+                        currentBoost = ((mapKpa - baroKpa).coerceAtLeast(0)) / 100.0f
+                    }
+
+                    // 3. МАСЛО
+                    if (oilConf == null) {
+                        val cand = oilCandidates[oilIdx]
+                        addLog("ПОИСК МАСЛА: ${cand.name}")
+                        sendRaw(cand.header)
+                        if (sendRaw(cand.command).contains(cand.expectedReply)) {
+                            oilConf = cand
+                            addLog(">>> НАЙДЕНО МАСЛО: ${cand.name}")
+                        } else {
+                            oilIdx = (oilIdx + 1) % oilCandidates.size
+                        }
+                    } else {
                         sendRaw(oilConf.header)
-                        val res = sendRaw(oilConf.command)
-                        parseHex(res, oilConf.expectedReply)?.let { currentOil = it - oilConf.offset }
+                        parseHex(sendRaw(oilConf.command), oilConf.expectedReply)?.let { currentOil = it - oilConf.offset }
                     }
 
-                    if (gearConf != null) {
+                    // 4. АКПП
+                    if (gearConf == null) {
+                        val cand = gearCandidates[gearIdx]
+                        addLog("ПОИСК АКПП: ${cand.name}")
+                        sendRaw(cand.header)
+                        if (sendRaw(cand.command).contains(cand.expectedReply)) {
+                            gearConf = cand
+                            addLog(">>> НАЙДЕНА АКПП: ${cand.name}")
+                        } else {
+                            gearIdx = (gearIdx + 1) % gearCandidates.size
+                        }
+                    } else {
                         sendRaw(gearConf.header)
-                        val res = sendRaw(gearConf.command)
-                        parseHex(res, gearConf.expectedReply)?.let { currentGear = it - gearConf.offset }
+                        parseHex(sendRaw(gearConf.command), gearConf.expectedReply)?.let { currentGear = it - gearConf.offset }
                     }
 
-                    _metrics.value = LiveMetrics(currentCoolant, currentOil, currentGear, boost)
-                    delay(250) 
+                    _metrics.value = LiveMetrics(currentCoolant, currentOil, currentGear, currentBoost)
+                    delay(250) // Важная пауза, чтобы не повесить адаптер
                 }
             } catch (e: Exception) {
                 val err = e.message ?: "Неизвестная ошибка"
@@ -558,7 +589,7 @@ class BmwElm327Driver {
         val out = output ?: return "ERR_NO_OUT"
         val inp = input ?: return "ERR_NO_IN"
         try {
-            while (inp.available() > 0) inp.read()
+            while (inp.available() > 0) inp.read() // Очистка буфера
 
             out.write((cmd + "\r").toByteArray())
             out.flush()
@@ -571,9 +602,7 @@ class BmwElm327Driver {
             while (timeout < 30) { 
                 if (inp.available() > 0) {
                     val ch = inp.read().toChar()
-                    if (ch == '>') {
-                        break 
-                    }
+                    if (ch == '>') break 
                     sb.append(ch)
                 } else {
                     Thread.sleep(100)
@@ -618,7 +647,7 @@ fun FullBmwDashboard(metrics: LiveMetrics, dragData: DragResult, status: String,
         ) {
             Text(
                 text = status,
-                color = if (status.contains("СБОЙ") || status.contains("ОШИБКА")) Color.Red else if (status.contains("ОПРОС")) Color.Cyan else Color.Yellow,
+                color = if (status.contains("СБОЙ") || status.contains("ОШИБКА")) Color.Red else if (status.contains("ОПРОС") || status.contains("СКАНИРОВАНИЕ")) Color.Cyan else Color.Yellow,
                 fontSize = 13.sp, fontWeight = FontWeight.Bold, textAlign = TextAlign.Center,
                 modifier = Modifier.fillMaxWidth().padding(16.dp)
             )
